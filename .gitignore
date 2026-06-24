@@ -1,8 +1,8 @@
 # Binaries
 build/
-marmot
-marmot-arm
-marmot-arm64
+/marmot
+/marmot-arm
+/marmot-arm64
 
 # IDE
 .vscode/
