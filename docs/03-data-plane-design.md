@@ -183,22 +183,27 @@ Flow Cache 是 BPF Flow Map 在 eBPF 程序运行时的逻辑视图：
 TC ingress 收到数据包
         │
         ▼
-提取 5-tuple: {src_ip, dst_ip, src_port, dst_port, protocol}
+提取 dst IP
         │
         ▼
-bpf_map_lookup_elem(&flow_map, &key)
+bpf_map_lookup_elem(&cidr_whitelist, &ip)   ← 🔺 CIDR 白名单优先检查
         │
-        ├── HIT ──→ 读取 action + outbound_tag
-        │            │
-        │            ├── DIRECT  → 不设 fwmark，内核转发
-        │            ├── PROXY   → 设置 fwmark=1 → TProxy
-        │            └── BLOCK   → 直接丢弃 (TC_ACT_SHOT)
+        ├── HIT ──→ 内核直接转发（不设 fwmark, 不查 Flow Cache）
+        │            CIDR 白名单 = 静态确定性规则，优先级高于一切
         │
-        └── MISS ──→ bpf_map_lookup_elem(&cidr_whitelist, &ip)
-                      │
-                      ├── HIT ──→ DIRECT（不发 TProxy）
-                      │
-                      └── MISS ──→ 设置 fwmark=1 → TProxy (Slow Path)
+        └── MISS ──→ 提取 5-tuple: {src_ip, dst_ip, src_port, dst_port, protocol}
+                       │
+                       ▼
+                      bpf_map_lookup_elem(&flow_map, &key)
+                       │
+                       ├── HIT ──→ 读取 action + outbound_tag
+                       │            │
+                       │            ├── DIRECT  → 内核转发
+                       │            ├── PROXY   → 设置 fwmark=1 → TProxy
+                       │            └── BLOCK   → TC_ACT_SHOT
+                       │
+                       └── MISS ──→ 设置 fwmark=1 → TProxy (Slow Path)
+                                      规则引擎决策后写入 Flow Cache
 ```
 
 ---
@@ -292,7 +297,10 @@ func (c *Cache) Flush() {
    │            │               │               │               │
    │  SYN ────► │               │               │               │
    │            │               │               │               │
-   │            │  Lookup flow_map(key)         │               │
+   │            │  ① Lookup cidr_whitelist(dst_ip)  ← 🔺 优先
+   │            │  → MISS（未命中白名单）          │               │
+   │            │               │               │               │
+   │            │  ② Lookup flow_map(key)        │               │
    │            │──────────────►│               │               │
    │            │◄──── MISS ────│               │               │
    │            │               │               │               │
@@ -623,12 +631,12 @@ func (m *FlowCacheManager) GC(ctx context.Context) {
 
 ### Fast Path（内核态，零用户态开销）
 
-| 流量类型 | 处理方式 | 性能特征 |
-|---------|---------|---------|
-| Flow Cache HIT + DIRECT | 内核直接转发 | 🔥 接近裸机转发 |
-| Flow Cache HIT + PROXY | 设 fwmark=1 → Policy Route → TProxy | 🔥 仅设置 mark，无上下文切换 |
-| Flow Cache HIT + BLOCK | TC_ACT_SHOT 内核丢弃 | 🔥 零开销 |
-| CIDR 白名单 HIT | 内核直接转发 | 🔥 无需建立 flow |
+| 流量类型 | 优先级 | 处理方式 | 性能特征 |
+|---------|--------|---------|---------|
+| **CIDR 白名单 HIT** | 🥇 最高 | 内核直接转发，**不查 Flow Cache** | 🔥 零额外开销 |
+| Flow Cache HIT + DIRECT | 🥈 | 内核直接转发 | 🔥 接近裸机转发 |
+| Flow Cache HIT + PROXY | 🥈 | 设 fwmark=1 → Policy Route → TProxy | 🔥 仅设置 mark，无上下文切换 |
+| Flow Cache HIT + BLOCK | 🥈 | TC_ACT_SHOT 内核丢弃 | 🔥 零开销 |
 
 ### Slow Path（用户态，首包开销）
 

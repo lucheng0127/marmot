@@ -36,7 +36,8 @@
 │  │       │  ┌──────────────▼──────────────┐     │           │  │
 │  │       │  │ eBPF TC Hook + Flow BPF Map │     │           │  │
 │  │       │  │ br0 ingress                  │     │           │  │
-│  │       │  │ Flow Cache Lookup → Fast Path│     │           │  │
+│  │       │  │ ① CIDR 白名单查检 → 命中即直连│     │           │  │
+│  │       │  │ ② Flow Cache Lookup → Fast Path│     │           │  │
 │  │       │  │ Flow Cache Miss → Slow Path  │     │           │  │
 │  │       │  └──────────────────────────────┘     │           │  │
 │  │       │                                        │           │  │
@@ -96,24 +97,35 @@
                     └────────┬────────────┘
                              │
                     ┌────────▼────────────┐
-                    │ TC ingress (eBPF)   │  ← Fast Path 起点
+                    │  TC ingress (eBPF)   │  ← Fast Path 起点
                     │                     │
-                    │ Flow BPF Map Lookup │
-                    │ (5-tuple 哈希)      │
+                    │ ① CIDR 白名单检查   │  ← 🔺 优先级最高
+                    │  (LPM_TRIE dst IP)  │     静态规则，确定性
                     └────────┬────────────┘
                              │
               ┌──────────────┴──────────────┐
               ▼                             ▼
-     ┌────────────────┐          ┌─────────────────────┐
-     │ Fast Path HIT  │          │ Fast Path MISS      │
-     │ (缓存命中)     │          │ (缓存未命中)        │
-     │                │          │                     │
-     │ 读取 action：  │          │ 设置 fwmark=1       │
-     │  direct → 放行 │          │ → TProxy            │
-     │  proxy → 转发  │          │ → Rule Engine       │
-     │  block → 丢弃  │          │ → 写 Conntrack Cache│
-     │                │          │ → 同步 Flow BPF Map │
-     └────────────────┘          └─────────────────────┘
+     ┌────────────────┐          ┌──────────────────────┐
+     │ CIDR 白名单 HIT│          │ CIDR 白名单 MISS      │
+     │ (静态规则命中) │          │ (未匹配白名单)         │
+     │                │          │                       │
+     │ 内核直接转发    │          │ ② Flow BPF Map       │
+     │ 不设 fwmark     │          │    Lookup (5-tuple)   │
+     │ 不查 Flow Cache│          │                       │
+     │                │          └──────────┬────────────┘
+     └────────────────┘                     │
+                              ┌──────────────┴──────────────┐
+                              ▼                             ▼
+                     ┌────────────────┐          ┌─────────────────────┐
+                     │ Fast Path HIT  │          │ Fast Path MISS      │
+                     │ (Flow Cache    │          │ (Flow Cache 未命中) │
+                     │  命中)         │          │                     │
+                     │                │          │ 设置 fwmark=1       │
+                     │ 读取 action：  │          │ → TProxy            │
+                     │  direct → 放行 │          │ → Rule Engine       │
+                     │  proxy → 转发  │          │ → 写 Conntrack Cache│
+                     │  block → 丢弃  │          │ → 同步 Flow BPF Map │
+                     └────────────────┘          └─────────────────────┘
                                              │
                                         (下次命中)
                                              │
