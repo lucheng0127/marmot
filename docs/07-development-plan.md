@@ -389,11 +389,13 @@ Flow Learning 验证（核心验收项）：
 | 3.7 | SS/VMess/VLESS/Trojan 各协议集成测试 | 测试报告 | 4h |
 | 3.8 | 多节点配置 + 故障自动切换测试 | 测试报告 | 3h |
 | 3.9 | 热重载配置 + 平滑切换 | `pkg/proxy/options.go` | 4h |
+| 3.10 | UDP TProxy（从 Phase 2 推迟）| `pkg/tproxy/udp.go` | 4h |
 
 ### 关键交付物
 - sing-box 作为 library 正常运行
 - TProxy → sing-box outbound → 远程服务器
 - 多节点支持 + 健康检查自动切换
+- UDP TProxy 支持（从 Phase 2 推迟）
 
 ### 验证标准
 
@@ -478,10 +480,11 @@ Level 2（本地验证）：
 | 5.11 | MatchResult + 匹配 Trace（可观测性）| `pkg/observe/match_trace.go` | 4h |
 | 5.12 | 规则命中统计 | `pkg/observe/stats.go` | 2h |
 | 5.13 | Debug 模式 + 排查 API | `pkg/observe/debug.go` | 3h |
-| 5.14 | 端到端集成测试（全链路）| 自动化测试套件 | 8h |
-| 5.15 | 树莓派交叉编译与部署测试 | 树莓派验证报告 | 4h |
-| 5.16 | 性能基准测试（wrk/iperf3）| 性能报告 | 4h |
-| 5.17 | 文档完善（README + 配置说明 + 部署指南）| 文档更新 | 4h |
+| 5.14 | Decision Interface → Rule Engine 集成（替换 Phase 2 的 bare Decision）| `pkg/tproxy/` | 4h |
+| 5.15 | 端到端集成测试（全链路）| 自动化测试套件 | 8h |
+| 5.16 | 树莓派交叉编译与部署测试 | 树莓派验证报告 | 4h |
+| 5.17 | 性能基准测试（wrk/iperf3）| 性能报告 | 4h |
+| 5.18 | 文档完善（README + 配置说明 + 部署指南）| 文档更新 | 4h |
 
 ### 规则优先级
 ```
