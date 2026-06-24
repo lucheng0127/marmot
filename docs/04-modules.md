@@ -164,4 +164,6 @@ Step 10 → Step 9 → ... → Step 1
 | HTTP API | github.com/gin-gonic/gin 或 net/http | 轻量 API 需求，后续决定 |
 | 日志 | github.com/sirupsen/logrus | 结构化日志 |
 | GeoIP 解析 | github.com/oschwald/maxminddb-golang | MaxMind DB 格式解析 |
-| 规则匹配 | 自实现 Trie + radix tree | 性能优先，避免依赖过度 |
+| 规则匹配（域名精确/后缀）| 自实现 反转域名 Trie | O(n) 匹配，内存紧凑 |
+| 规则匹配（域名关键字）| 自实现 Aho-Corasick 自动机 | O(n) 多模式匹配，单次扫描 |
+| 规则匹配（IP CIDR）| radix tree / trie | O(1) ~ O(k) 匹配 |

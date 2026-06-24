@@ -355,24 +355,136 @@ dns:
 #### 规则匹配优先级
 
 ```
-1. 自定义域名规则       ── 精确匹配域名（规则引擎最优先）
-2. 自定义 IP 规则       ── 精确匹配 IP/CIDR
-3. GeoSite 规则         ── 基于域名归属
-4. GeoIP 规则           ── 基于 IP 归属
-5. 默认规则             ── 兜底策略
+1. 自定义域名精确匹配 (domain)        ── 精确匹配完整域名（最高优先级）
+2. 自定义域名后缀匹配 (domain_suffix)  ── 匹配域名后缀及其所有子域名
+3. 自定义域名关键字匹配 (domain_keyword)── 域名中包含指定关键字
+4. 自定义 IP 规则 (ip)                ── 精确匹配 IP/CIDR
+5. GeoSite 规则 (geosite)             ── 基于域名归属的 Geo 数据库
+6. GeoIP 规则 (geoip)                 ── 基于 IP 归属的 Geo 数据库
+7. 默认规则 (default)                 ── 兜底策略
 
 每个规则可指定 Action：
   - 对流量：direct / proxy:<tag> / block
   - 对 DNS：dns_upstream:<tag> / proxy:<tag> / block
 ```
 
+---
+
+#### 域名匹配三种模式详解
+
+| 匹配模式 | Type 值 | 规则写法 | 匹配示例 | 实现算法 |
+|---------|---------|---------|---------|---------|
+| **精确匹配** | `domain` | `match: "netflix.com"` | 仅 `netflix.com` | 哈希表 O(1) |
+| **后缀匹配** | `domain_suffix` | `match: "example.com"` | `example.com`, `sub.example.com`, `api.sub.example.com` | 反转域名 Trie O(n) |
+| **关键字匹配** | `domain_keyword` | `match: "google"` | `google.com`, `www.google.com`, `googleapis.com`, `googlescholar.com` | Aho-Corasick 自动机 |
+
+**匹配语义定义**：
+
+```go
+// 三种域名匹配类型的精确语义：
+
+// domain — 完整域名精确匹配
+match("netflix.com") == "netflix.com"         // ✅ 匹配
+match("netflix.com") == "www.netflix.com"     // ❌ 不匹配
+match("netflix.com") == "api.netflix.com"     // ❌ 不匹配
+
+// domain_suffix — 域名后缀匹配（含自身）
+match("example.com") == "example.com"            // ✅ 自身匹配
+match("example.com") == "sub.example.com"        // ✅ 子域名匹配
+match("example.com") == "deep.api.example.com"   // ✅ 多层子域名匹配
+match("example.com") == "notexample.com"         // ❌ 不是后缀关系
+
+// domain_keyword — 域名中任意位置包含关键字
+match("google") == "google.com"                  // ✅ 头部匹配
+match("google") == "www.google.com"              // ✅ 中间匹配
+match("google") == "googlescholar.com"           // ✅ 头部部分匹配
+match("google") == "xgoogle.com"                 // ✅ 不跨标签，仍为 true
+```
+
+**配置示例**：
+
+```yaml
+rules:
+  # ---- 域名精确匹配 ----
+  - type: domain
+    match: "netflix.com"
+    action:
+      mode: proxy
+      tag: "proxy-us"
+
+  - type: domain
+    match: "bilibili.com"
+    action:
+      mode: direct
+
+  # ---- 域名后缀匹配 ----
+  - type: domain_suffix
+    match: "google.com"
+    action:
+      mode: proxy
+      tag: "proxy-us"
+      # 匹配 google.com + 所有子域名
+
+  - type: domain_suffix
+    match: "cdn-china.com"
+    action:
+      mode: direct
+      # 匹配所有 cdn-china.com 子域名直连
+
+  # ---- 域名关键字匹配 ----
+  - type: domain_keyword
+    match: "microsoft"
+    action:
+      mode: proxy
+      tag: "proxy-us"
+      # 匹配所有含 microsoft 的域名
+
+  - type: domain_keyword
+    match: "adservice"
+    action:
+      mode: block
+      # 广告域名拦截
+
+  # ---- 自定义 IP ----
+  - type: ip
+    match: "10.0.0.0/8"
+    action:
+      mode: direct
+
+  # ---- Geo ----
+  - type: geoip
+    match: "CN"
+    action:
+      mode: direct
+
+  - type: geosite
+    match: "cn"
+    action:
+      mode: direct
+
+  - type: geosite
+    match: "geolocation-!cn"
+    action:
+      mode: proxy
+      tag: "auto"
+
+  # ---- 默认 ----
+  - type: default
+    action:
+      mode: proxy
+      tag: "auto"
+```
+
+---
+
 #### 规则数据结构
 
 ```go
 type Rule struct {
     ID         string   // 规则唯一 ID
-    Type       string   // "ip" | "domain" | "geoip" | "geosite" | "default"
-    Match      string   // 匹配值：IP/CIDR/域名/geo 标签
+    Type       string   // "domain" | "domain_suffix" | "domain_keyword" |
+                        // "ip" | "geoip" | "geosite" | "default"
+    Match      string   // 匹配值：域名/IP/CIDR/geo 标签
     Action     Action   // 命中后执行的动作
     Priority   int      // 优先级（数值越小优先级越高）
     Metadata   map[string]string
