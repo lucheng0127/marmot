@@ -84,10 +84,10 @@ static __always_inline void inc_stats(__u32 index) {
 static __always_inline bool check_cidr_whitelist(__u32 dst_ip) {
     struct cidr_key key = {
         .prefixlen = 32,
-        .prefix[0] = (dst_ip >> 24) & 0xff,
-        .prefix[1] = (dst_ip >> 16) & 0xff,
-        .prefix[2] = (dst_ip >> 8) & 0xff,
-        .prefix[3] = (dst_ip >> 0) & 0xff,
+        .prefix[0] = (dst_ip >> 0) & 0xff,
+        .prefix[1] = (dst_ip >> 8) & 0xff,
+        .prefix[2] = (dst_ip >> 16) & 0xff,
+        .prefix[3] = (dst_ip >> 24) & 0xff,
     };
     struct cidr_value *val = bpf_map_lookup_elem(&cidr_whitelist, &key);
     return (val && val->action == CIDR_ACTION_PASS);
