@@ -1,0 +1,29 @@
+# Binaries
+build/
+marmot
+marmot-arm
+marmot-arm64
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+*.test
+*.out
+vendor/
+
+# BPF generated
+bpf_bpf*
+*.o
+*.ll
+
+# Misc
+*.log
+*.pid
