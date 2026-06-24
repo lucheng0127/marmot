@@ -9,110 +9,136 @@ import (
 	"github.com/lucheng0127/marmot/pkg/tproxy"
 )
 
-// SyncManager synchronizes Conntrack Cache decisions to the BPF Flow Map.
-// This is the bridge between the user-space Slow Path and kernel-space Fast Path.
+// SyncManager synchronizes Conntrack Cache decisions to the BPF Flow Maps.
+// Hybrid key design — TCP: 4-tuple (降维), UDP: 5-tuple.
 type SyncManager struct {
-	flowMap *ebpf.Map
-	cache   *Cache
+	tcpFlowMap *ebpf.Map
+	udpFlowMap *ebpf.Map
+	cache      *Cache
 }
 
-// NewSyncManager creates a SyncManager backed by the given BPF map and Cache.
-func NewSyncManager(flowMap *ebpf.Map, cache *Cache) *SyncManager {
+// NewSyncManager creates a SyncManager.
+func NewSyncManager(tcpFlowMap, udpFlowMap *ebpf.Map, cache *Cache) *SyncManager {
 	return &SyncManager{
-		flowMap: flowMap,
-		cache:   cache,
+		tcpFlowMap: tcpFlowMap,
+		udpFlowMap: udpFlowMap,
+		cache:      cache,
 	}
 }
 
-// Writeback writes a flow decision from Conntrack Cache to the BPF Flow Map.
-// This makes the decision available to the eBPF TC program for Fast Path.
+// Writeback writes a flow decision to the correct BPF map based on protocol.
 func (s *SyncManager) Writeback(key FlowKey, d tproxy.Decision) error {
-	if s.flowMap == nil {
-		return fmt.Errorf("flow map not initialized")
-	}
-
-	// Convert conntrack.FlowKey to BPF flow_key
-	var bpfKey bpf.MarmotFlowKey
-	bpfKey.SrcIp = key.SrcIP
-	bpfKey.DstIp = key.DstIP
-	bpfKey.SrcPort = key.SrcPort
-	bpfKey.DstPort = key.DstPort
-	bpfKey.Protocol = key.Protocol
-
-	// Build BPF flow_value
-	var bpfVal bpf.MarmotFlowValue
-	switch d {
-	case tproxy.DecisionDirect:
-		bpfVal.Action = 0 // FLOW_ACTION_DIRECT
-	case tproxy.DecisionProxy:
-		bpfVal.Action = 1 // FLOW_ACTION_PROXY
-	default:
-		return fmt.Errorf("unknown decision: %v", d)
-	}
-
-	// Set expiry (TTL from cache config, converted to seconds)
 	ttlSeconds := uint32(s.cache.ttl.Seconds())
 	if ttlSeconds <= 0 {
-		ttlSeconds = 3600 // default 1h
+		ttlSeconds = 3600
 	}
-	bpfVal.ExpireAt = uint32(time.Now().Unix()) + ttlSeconds
+	expireAt := uint32(time.Now().Unix()) + ttlSeconds
 
-	// Write to BPF map
-	if err := s.flowMap.Put(&bpfKey, &bpfVal); err != nil {
-		return fmt.Errorf("bpf map put: %w", err)
+	action := uint8(0) // direct
+	if d == tproxy.DecisionProxy {
+		action = 1
 	}
 
-	return nil
+	switch key.Protocol {
+	case 6: // TCP — write to tcp_flow_map with 4-tuple key
+		if s.tcpFlowMap == nil {
+			return fmt.Errorf("tcp flow map not initialized")
+		}
+		var k bpf.MarmotTcpFlowKey
+		k.SrcIp = key.SrcIP
+		k.DstIp = key.DstIP
+		k.DstPort = key.DstPort
+		k.Protocol = 6
+		var v bpf.MarmotFlowValue
+		v.Action = action
+		v.ExpireAt = expireAt
+		return s.tcpFlowMap.Put(&k, &v)
+
+	case 17: // UDP — write to udp_flow_map with 5-tuple key
+		if s.udpFlowMap == nil {
+			return fmt.Errorf("udp flow map not initialized")
+		}
+		var k bpf.MarmotUdpFlowKey
+		k.SrcIp = key.SrcIP
+		k.DstIp = key.DstIP
+		k.SrcPort = key.SrcPort
+		k.DstPort = key.DstPort
+		k.Protocol = 17
+		var v bpf.MarmotFlowValue
+		v.Action = action
+		v.ExpireAt = expireAt
+		return s.udpFlowMap.Put(&k, &v)
+
+	default:
+		return fmt.Errorf("unsupported protocol: %d", key.Protocol)
+	}
 }
 
-// Delete removes a flow entry from the BPF map.
+// Delete removes a flow entry from the correct BPF map.
 func (s *SyncManager) Delete(key FlowKey) error {
-	if s.flowMap == nil {
-		return nil
-	}
-
-	var bpfKey bpf.MarmotFlowKey
-	bpfKey.SrcIp = key.SrcIP
-	bpfKey.DstIp = key.DstIP
-	bpfKey.SrcPort = key.SrcPort
-	bpfKey.DstPort = key.DstPort
-	bpfKey.Protocol = key.Protocol
-
-	if err := s.flowMap.Delete(&bpfKey); err != nil {
-		return fmt.Errorf("bpf map delete: %w", err)
+	switch key.Protocol {
+	case 6:
+		if s.tcpFlowMap == nil {
+			return nil
+		}
+		var k bpf.MarmotTcpFlowKey
+		k.SrcIp = key.SrcIP
+		k.DstIp = key.DstIP
+		k.DstPort = key.DstPort
+		k.Protocol = 6
+		return s.tcpFlowMap.Delete(&k)
+	case 17:
+		if s.udpFlowMap == nil {
+			return nil
+		}
+		var k bpf.MarmotUdpFlowKey
+		k.SrcIp = key.SrcIP
+		k.DstIp = key.DstIP
+		k.SrcPort = key.SrcPort
+		k.DstPort = key.DstPort
+		k.Protocol = 17
+		return s.udpFlowMap.Delete(&k)
 	}
 	return nil
 }
 
-// FlushCache clears all entries from the BPF Flow Map.
-// Used during rule reload or graceful shutdown.
+// FlushCache clears all entries from both BPF Flow Maps.
 func (s *SyncManager) FlushCache() error {
-	if s.flowMap == nil {
-		return nil
+	if s.tcpFlowMap != nil {
+		if err := flushMap(s.tcpFlowMap); err != nil {
+			return err
+		}
 	}
+	if s.udpFlowMap != nil {
+		if err := flushMap(s.udpFlowMap); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-	var prevKey bpf.MarmotFlowKey
+func flushMap(m *ebpf.Map) error {
+	var prev interface{}
 	first := true
 	for {
-		var key bpf.MarmotFlowKey
+		var key interface{}
 		var err error
 		if first {
-			err = s.flowMap.NextKey(nil, &key)
+			err = m.NextKey(nil, &key)
 			first = false
 		} else {
-			err = s.flowMap.NextKey(&prevKey, &key)
+			err = m.NextKey(&prev, &key)
 		}
 		if err != nil {
 			break
 		}
-		_ = s.flowMap.Delete(&key)
-		prevKey = key
+		_ = m.Delete(key)
+		prev = key
 	}
 	return nil
 }
 
 // Connect wires the Conntrack Cache's BPFWriter to this SyncManager.
-// After calling Connect, every Cache.Insert will also write to the BPF map.
 func (s *SyncManager) Connect() {
 	s.cache.BPFWriter = func(key FlowKey, d tproxy.Decision) error {
 		return s.Writeback(key, d)

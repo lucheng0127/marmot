@@ -72,10 +72,10 @@ func (s *Server) Run() error {
 	s.ctCache = conntrack.New(1*time.Hour, 65536)
 	log.Info("Conntrack Cache created")
 
-	// 4. Create SyncManager and connect to BPF Flow Map
-	s.ctSync = conntrack.NewSyncManager(result.FlowMap, s.ctCache)
+	// 4. Create SyncManager and connect to BPF Flow Maps (hybrid key)
+	s.ctSync = conntrack.NewSyncManager(result.TcpFlowMap, result.UdpFlowMap, s.ctCache)
 	s.ctSync.Connect()
-	log.Info("BPF Flow Map sync connected")
+	log.Info("BPF Flow Map sync connected (TCP: 4-tuple, UDP: 5-tuple)")
 
 	// 5. Start Conntrack GC
 	gcStop := make(chan struct{})

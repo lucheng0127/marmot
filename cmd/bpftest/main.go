@@ -94,7 +94,7 @@ loop:
 			}
 
 			// Check flow map entries
-			flowOps := bpf.NewFlowMapOps(result.FlowMap)
+			flowOps := bpf.NewTCPFlowMapOps(result.TcpFlowMap)
 			count, _ := flowOps.Count()
 			fmt.Printf("  flow_map_entries: %d\n", count)
 

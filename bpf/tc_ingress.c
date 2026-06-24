@@ -15,15 +15,21 @@
 char LICENSE[] SEC("license") = "GPL";
 
 /* ================================================================
- *  BPF Map Definitions
+ *  Map Definitions
  * ================================================================ */
 
-struct flow_key {
+/*
+ * TCP Flow Map — 降维 key (去 src_port)
+ * Key:   {src_ip, dst_ip, dst_port, proto}
+ * Value: {action, outbound_tag, expire_at, hit_count}
+ *
+ * 跨连接共享：同一 client→target 的短连接共享同一 entry
+ */
+struct tcp_flow_key {
     __u32 src_ip;
     __u32 dst_ip;
-    __u16 src_port;
     __u16 dst_port;
-    __u8  protocol;
+    __u8  protocol;  /* always 6 */
     __u8  pad;
 };
 
@@ -37,18 +43,39 @@ struct flow_value {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 65536);
-    __type(key, struct flow_key);
+    __type(key, struct tcp_flow_key);
     __type(value, struct flow_value);
-} flow_map SEC(".maps");
+} tcp_flow_map SEC(".maps");
 
 /*
- * CIDR Whitelist - LPM trie for direct-bypass.
- * Key layout must match kernel struct bpf_lpm_trie_key:
- *   prefixlen (__u32) + prefix (__u32) = 8 bytes.
+ * UDP Flow Map — 完整 5-tuple
+ * Key:   {src_ip, src_port, dst_ip, dst_port, proto}
+ * Value: {action, outbound_tag, expire_at, hit_count}
+ *
+ * UDP 保持 5-tuple 精度：对称 NAT 下不同 src_port 不合并
+ */
+struct udp_flow_key {
+    __u32 src_ip;
+    __u32 dst_ip;
+    __u16 src_port;
+    __u16 dst_port;
+    __u8  protocol;  /* always 17 */
+    __u8  pad;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, struct udp_flow_key);
+    __type(value, struct flow_value);
+} udp_flow_map SEC(".maps");
+
+/*
+ * CIDR Whitelist — LPM trie, checked before flow cache
  */
 struct cidr_key {
     __u32 prefixlen;
-    __u8  prefix[4];  /* IPv4 address bytes (MSB first = network order) */
+    __u8  prefix[4];
 };
 
 struct cidr_value {
@@ -63,6 +90,7 @@ struct {
     __type(value, struct cidr_value);
 } cidr_whitelist SEC(".maps");
 
+/* Statistics */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 16);
@@ -71,17 +99,15 @@ struct {
 } stats_map SEC(".maps");
 
 /* ================================================================
- *  Helper functions
+ *  Helpers
  * ================================================================ */
 
 static __always_inline void inc_stats(__u32 index) {
     __u64 *val = bpf_map_lookup_elem(&stats_map, &index);
-    if (val) {
-        __sync_fetch_and_add(val, 1);
-    }
+    if (val) __sync_fetch_and_add(val, 1);
 }
 
-static __always_inline bool check_cidr_whitelist(__u32 dst_ip) {
+static __always_inline bool check_cidr(__u32 dst_ip) {
     struct cidr_key key = {
         .prefixlen = 32,
         .prefix[0] = (dst_ip >> 0) & 0xff,
@@ -93,19 +119,12 @@ static __always_inline bool check_cidr_whitelist(__u32 dst_ip) {
     return (val && val->action == CIDR_ACTION_PASS);
 }
 
-static __always_inline int lookup_flow_cache(struct flow_key *key) {
-    struct flow_value *val = bpf_map_lookup_elem(&flow_map, key);
-    if (!val) return -1;
-
-    __u64 now = bpf_ktime_get_ns() / 1000000000ULL;
-    if (val->expire_at < now) return -1;
-
-    __sync_fetch_and_add(&val->hit_count, 1);
-    return val->action;
-}
-
 /* ================================================================
- *  TC Ingress - main entry point
+ *  TC Ingress — main entry point
+ *
+ *  Flow cache lookup:
+ *    TCP: 降维 key {src_ip, dst_ip, dst_port}
+ *    UDP: 完整 5-tuple {src_ip, src_port, dst_ip, dst_port}
  * ================================================================ */
 SEC("tc")
 int tc_ingress(struct __sk_buff *skb) {
@@ -113,64 +132,77 @@ int tc_ingress(struct __sk_buff *skb) {
     void *data     = (void *)(long)skb->data;
     struct ethhdr *eth = data;
 
-    if ((void *)(eth + 1) > data_end) {
-        inc_stats(STATS_TOTAL_PACKETS);
-        return TC_ACT_OK;
-    }
-    if (bpf_ntohs(eth->h_proto) != ETH_P_IP) {
-        inc_stats(STATS_TOTAL_PACKETS);
-        return TC_ACT_OK;
-    }
+    if ((void *)(eth + 1) > data_end) return TC_ACT_OK;
+    if (bpf_ntohs(eth->h_proto) != ETH_P_IP) return TC_ACT_OK;
 
     struct iphdr *ip = data + sizeof(struct ethhdr);
-    if ((void *)(ip + 1) > data_end) {
-        inc_stats(STATS_TOTAL_PACKETS);
-        return TC_ACT_OK;
-    }
+    if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
 
     __u32 dst_ip = ip->daddr;
-    __u8 protocol = ip->protocol;
-    inc_stats(STATS_TOTAL_PACKETS);
+    __u8 proto = ip->protocol;
 
-    /* Step 1: CIDR Whitelist - highest priority */
-    if (check_cidr_whitelist(dst_ip)) {
+    /* Step 1: CIDR whitelist */
+    if (check_cidr(dst_ip)) {
         inc_stats(STATS_CIDR_HIT);
         return TC_ACT_OK;
     }
 
-    /* Step 2: Flow Cache lookup */
-    struct flow_key fkey = {};
-    fkey.src_ip   = ip->saddr;
-    fkey.dst_ip   = ip->daddr;
-    fkey.protocol = protocol;
+    __u64 now = bpf_ktime_get_ns() / 1000000000ULL;
 
-    if (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP) {
+    /* Step 2: Flow Cache lookup — hybrid key by protocol */
+    if (proto == IPPROTO_TCP) {
         __u32 ip_hdr_len = ip->ihl * 4;
         if (ip_hdr_len < sizeof(struct iphdr)) return TC_ACT_OK;
         struct tcphdr *tcp = (void *)ip + ip_hdr_len;
         if ((void *)(tcp + 1) > data_end) return TC_ACT_OK;
-        fkey.src_port = tcp->source;
-        fkey.dst_port = tcp->dest;
-    }
 
-    int action = lookup_flow_cache(&fkey);
-    if (action >= 0) {
-        inc_stats(STATS_FLOW_HIT);
-        switch (action) {
-        case FLOW_ACTION_DIRECT: return TC_ACT_OK;
-        case FLOW_ACTION_PROXY:
-            skb->mark = 1;
-            inc_stats(STATS_PROXY_MARK);
-            return TC_ACT_OK;
-        case FLOW_ACTION_BLOCK:
-            inc_stats(STATS_BLOCK_DROP);
-            return TC_ACT_SHOT;
-        default:
-            return TC_ACT_OK;
+        struct tcp_flow_key key = {
+            .src_ip   = ip->saddr,
+            .dst_ip   = ip->daddr,
+            .dst_port = tcp->dest,
+            .protocol = IPPROTO_TCP,
+        };
+
+        struct flow_value *val = bpf_map_lookup_elem(&tcp_flow_map, &key);
+        if (val) {
+            if (val->expire_at >= now) {
+                __sync_fetch_and_add(&val->hit_count, 1);
+                inc_stats(STATS_FLOW_HIT);
+                if (val->action == FLOW_ACTION_PROXY) {
+                    skb->mark = 1;
+                    inc_stats(STATS_PROXY_MARK);
+                }
+                return TC_ACT_OK;
+            }
+        }
+    } else if (proto == IPPROTO_UDP) {
+        __u32 ip_hdr_len = ip->ihl * 4;
+        struct udphdr *udp = (void *)ip + ip_hdr_len;
+        if ((void *)(udp + 1) > data_end) return TC_ACT_OK;
+
+        struct udp_flow_key key = {
+            .src_ip   = ip->saddr,
+            .dst_ip   = ip->daddr,
+            .src_port = udp->source,
+            .dst_port = udp->dest,
+            .protocol = IPPROTO_UDP,
+        };
+
+        struct flow_value *val = bpf_map_lookup_elem(&udp_flow_map, &key);
+        if (val) {
+            if (val->expire_at >= now) {
+                __sync_fetch_and_add(&val->hit_count, 1);
+                inc_stats(STATS_FLOW_HIT);
+                if (val->action == FLOW_ACTION_PROXY) {
+                    skb->mark = 1;
+                    inc_stats(STATS_PROXY_MARK);
+                }
+                return TC_ACT_OK;
+            }
         }
     }
 
-    /* Step 3: Flow Cache MISS - mark for TProxy */
+    /* Step 3: Flow Cache MISS — mark for TProxy */
     inc_stats(STATS_FLOW_MISS);
     inc_stats(STATS_PROXY_MARK);
     skb->mark = 1;

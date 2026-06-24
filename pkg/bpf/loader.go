@@ -21,7 +21,8 @@ type Manager struct {
 
 // LoadResult contains references to loaded eBPF objects.
 type LoadResult struct {
-	FlowMap       *ebpf.Map
+	TcpFlowMap    *ebpf.Map // TCP: 4-tuple key (降维)
+	UdpFlowMap    *ebpf.Map // UDP: 5-tuple key
 	CidrWhitelist *ebpf.Map
 	StatsMap      *ebpf.Map
 	Program       *ebpf.Program
@@ -56,7 +57,8 @@ func (m *Manager) Load() (*LoadResult, error) {
 	}
 
 	return &LoadResult{
-		FlowMap:       m.objs.FlowMap,
+		TcpFlowMap:    m.objs.TcpFlowMap,
+		UdpFlowMap:    m.objs.UdpFlowMap,
 		CidrWhitelist: m.objs.CidrWhitelist,
 		StatsMap:      m.objs.StatsMap,
 		Program:       m.objs.TcIngress,
@@ -186,14 +188,16 @@ func (m *Manager) RemoveCIDR(cidr string) error {
 	return m.objs.CidrWhitelist.Delete(&key)
 }
 
-// IPToUint32 converts an IPv4 address to network byte order uint32.
+// IPToUint32 converts IPv4 address bytes to LE uint32 (matching eBPF __u32 on ARM/x86).
+// eBPF loads ip->saddr as native-endian __u32 from the packet's network-order bytes.
+// On LE hardware (ARM/x86), byte C0 A8 64 02 becomes u32 0x0264A8C0.
 func IPToUint32(ip net.IP) uint32 {
 	ip = ip.To4()
 	if ip == nil {
 		return 0
 	}
-	return (uint32(ip[0]) << 24) | (uint32(ip[1]) << 16) |
-		(uint32(ip[2]) << 8) | uint32(ip[3])
+	return uint32(ip[0]) | (uint32(ip[1]) << 8) |
+		(uint32(ip[2]) << 16) | (uint32(ip[3]) << 24)
 }
 
 func execCmd(name string, args ...string) error {

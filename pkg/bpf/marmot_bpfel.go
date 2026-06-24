@@ -24,7 +24,25 @@ type MarmotCidrValue struct {
 	Action uint8
 }
 
-type MarmotFlowKey struct {
+type MarmotFlowValue struct {
+	_           structs.HostLayout
+	Action      uint8
+	OutboundTag [16]uint8
+	_           [3]byte
+	ExpireAt    uint32
+	HitCount    uint32
+}
+
+type MarmotTcpFlowKey struct {
+	_        structs.HostLayout
+	SrcIp    uint32
+	DstIp    uint32
+	DstPort  uint16
+	Protocol uint8
+	Pad      uint8
+}
+
+type MarmotUdpFlowKey struct {
 	_        structs.HostLayout
 	SrcIp    uint32
 	DstIp    uint32
@@ -33,15 +51,6 @@ type MarmotFlowKey struct {
 	Protocol uint8
 	Pad      uint8
 	_        [2]byte
-}
-
-type MarmotFlowValue struct {
-	_           structs.HostLayout
-	Action      uint8
-	OutboundTag [16]uint8
-	_           [3]byte
-	ExpireAt    uint32
-	HitCount    uint32
 }
 
 // LoadMarmot returns the embedded CollectionSpec for Marmot.
@@ -94,8 +103,9 @@ type MarmotProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type MarmotMapSpecs struct {
 	CidrWhitelist *ebpf.MapSpec `ebpf:"cidr_whitelist"`
-	FlowMap       *ebpf.MapSpec `ebpf:"flow_map"`
 	StatsMap      *ebpf.MapSpec `ebpf:"stats_map"`
+	TcpFlowMap    *ebpf.MapSpec `ebpf:"tcp_flow_map"`
+	UdpFlowMap    *ebpf.MapSpec `ebpf:"udp_flow_map"`
 }
 
 // MarmotVariableSpecs contains global variables before they are loaded into the kernel.
@@ -125,15 +135,17 @@ func (o *MarmotObjects) Close() error {
 // It can be passed to LoadMarmotObjects or ebpf.CollectionSpec.LoadAndAssign.
 type MarmotMaps struct {
 	CidrWhitelist *ebpf.Map `ebpf:"cidr_whitelist"`
-	FlowMap       *ebpf.Map `ebpf:"flow_map"`
 	StatsMap      *ebpf.Map `ebpf:"stats_map"`
+	TcpFlowMap    *ebpf.Map `ebpf:"tcp_flow_map"`
+	UdpFlowMap    *ebpf.Map `ebpf:"udp_flow_map"`
 }
 
 func (m *MarmotMaps) Close() error {
 	return _MarmotClose(
 		m.CidrWhitelist,
-		m.FlowMap,
 		m.StatsMap,
+		m.TcpFlowMap,
+		m.UdpFlowMap,
 	)
 }
 

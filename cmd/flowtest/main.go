@@ -43,7 +43,7 @@ func main() {
 	ctCache := conntrack.New(1*time.Hour, 65536)
 
 	// 4. Create SyncManager + connect to BPF Flow Map
-	ctSync := conntrack.NewSyncManager(result.FlowMap, ctCache)
+	ctSync := conntrack.NewSyncManager(result.TcpFlowMap, result.UdpFlowMap, ctCache)
 	ctSync.Connect()
 	log.Info("Flow Map sync connected")
 
@@ -81,13 +81,14 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	prevStats, _ := mgr.Stats.Read()
+	prevFlowCount := 0
 
 loop:
 	for {
 		select {
 		case <-ticker.C:
 			snap, _ := mgr.Stats.Read()
-			flowCount, _ := bpf.NewFlowMapOps(result.FlowMap).Count()
+			flowCount, _ := bpf.NewTCPFlowMapOps(result.TcpFlowMap).Count()
 
 			fmt.Printf("\n--- %s ---\n", time.Now().Format("15:04:05"))
 			fmt.Print(snap.String())
@@ -98,14 +99,15 @@ loop:
 			if snap.FlowMiss > prevStats.FlowMiss {
 				fmt.Printf("  >>> FlowCacheMISS detected (+%d) <<<\n", snap.FlowMiss-prevStats.FlowMiss)
 			}
-			if flowCount > 0 && snap.FlowHit == 0 {
-				fmt.Println("  Flow written to BPF Map - ready for HIT test")
-			}
 			if snap.FlowHit > prevStats.FlowHit {
 				fmt.Printf("  >>> FlowCacheHIT detected (+%d) <<< 🎉\n", snap.FlowHit-prevStats.FlowHit)
 				fmt.Println("  *** FLOW LEARNING VERIFIED ***")
 			}
+			if flowCount > 0 && prevFlowCount == 0 && flowCount > prevFlowCount {
+				fmt.Printf("  Flow written to TCP_flow_map: now %d entries\n", flowCount)
+			}
 			prevStats = snap
+			prevFlowCount = flowCount
 
 		case sig := <-sigCh:
 			log.Info("signal received", map[string]interface{}{"signal": sig.String()})
