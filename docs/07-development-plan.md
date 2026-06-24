@@ -267,16 +267,18 @@ Level 1（netns + veth + bridge）：
 | 2.3 | Decision Interface 抽象（Direct/Proxy 两种决策）| `pkg/tproxy/decision.go` | 2h |
 | 2.4 | Conntrack Cache 主结构（FlowKey/FlowEntry）| `pkg/conntrack/cache.go` | 6h |
 | 2.5 | Conntrack GC + 淘汰策略 | `pkg/conntrack/cache.go` | 4h |
-| 2.6 | BPF Map 同步逻辑（Insert/Delete/Update）| `pkg/conntrack/sync.go` | 6h |
+| 2.6 | BPF Map 同步逻辑（Insert/Delete/Update）— **Phase 2a: 统一 5-tuple** | `pkg/conntrack/sync.go` | 4h |
 | 2.7 | Fast Path Workflow 集成（TProxy → Decision → Cache → BPF Map）| 集成代码 | 4h |
 | 2.8 | 端到端 Fast/Slow Path 测试（含 Flow Learning 验证）| 测试报告 | 4h |
+| 2.9 | ⭐ **混合 Key BPF Map 重构** — TCP 降维 + UDP 5-tuple 双 Map 方案 | `pkg/bpf/maps.go`, `pkg/conntrack/sync.go` | 6h |
 
 ### 关键交付物
 - TCP TProxy 正常运行（SO_ORIGINAL_DST 可正确提取原始目标地址）
 - Decision Interface 提供 Direct / Proxy 两种决策
-- Conntrack Cache 可缓存 Flow 决策（仅缓存 Decision，不含 Rule/Domain/DNS 信息）
-- Flow BPF Map Writeback 同步正常
+- Conntrack Cache 可缓存 Flow 决策（统一 5-tuple）
+- Flow BPF Map 混合 Key 方案（TCP 降维 + UDP 5-tuple）
 - Fast / Slow Path 闭环验证（首次 MISS → 后续 HIT）
+- 跨 TCP 连接的 Flow HIT 验证（同目标不同 src_port 命中缓存）
 
 ---
 
@@ -285,11 +287,12 @@ Level 1（netns + veth + bridge）：
 Conntrack Cache 职责：**仅缓存 Flow 决策**，禁止扩展为 Rule Cache。
 
 ```go
-// FlowKey — 5-tuple 连接标识
-type FlowKey struct {
-    SrcIP    net.IP
-    DstIP    net.IP
+// ConnKey — 5-tuple 连接标识 (Layer 1: session tracking)
+// Conntrack Cache 始终使用完整 5-tuple，与 protocol 无关。
+type ConnKey struct {
+    SrcIP    uint32
     SrcPort  uint16
+    DstIP    uint32
     DstPort  uint16
     Protocol uint8
 }
@@ -315,6 +318,36 @@ const (
 - ❌ Rule ID / Rule Type
 - ❌ DNS Metadata
 - ❌ 任何路由规则上下文
+
+---
+
+### Flow BPF Map 混合 Key 设计 ⭐
+
+根据 `docs/09-conntrack-key-design.md` 的工程决策结论，Flow Cache (Fast Path BPF Map) 使用**混合 Key 方案**：
+
+```
+TCP Flow Key:   {src_ip, dst_ip, dst_port, proto}     → 降维 (去 src_port)
+UDP Flow Key:   {src_ip, src_port, dst_ip, dst_port, proto} → 完整 5-tuple
+```
+
+实现方式：
+
+```c
+// eBPF — 两个独立的 HASH MAP，根据 protocol 选择
+struct tcp_flow_map { ... };   // TCP: 4-tuple key
+struct udp_flow_map { ... };   // UDP: 5-tuple key
+
+int lookup_flow(struct __sk_buff *skb) {
+    if (protocol == IPPROTO_TCP)
+        return lookup_elem(&tcp_flow_map, tcp_key);
+    else
+        return lookup_elem(&udp_flow_map, udp_key);
+}
+```
+
+**Conntrack Cache (session tracking) 始终使用统一 5-tuple，不受此影响。**
+
+详细分析见 `docs/09-conntrack-key-design.md`。
 
 ---
 
@@ -358,10 +391,11 @@ Level 2（本地 Xray 模拟代理）：
 
 Flow Learning 验证（核心验收项）：
 6. 第一次访问目标 A → 统计 FlowCacheMiss++
-7. FlowMap Writeback 确认 → bpftool/map dump 可见新 flow entry
-8. 第二次访问目标 A → 统计 FlowCacheHit++
-   (无需再次进入用户态 Decision)
-9. 验证: FlowCacheMiss 仅增一次，FlowCacheHit ≥ 1
+7. Conntrack Insert 确认 → conntrack_cache > 0
+8. BPF Flow Map Writeback 确认 → flow_map_entries > 0
+9. 第二次访问**同一目标 A（新 src_port）**→ TCP 降维命中 → FlowCacheHit++
+10. UDP 不同 src_port → 不命中（5-tuple 隔离）→ FlowCacheMiss++
+11. 验证: TCP FlowCacheMiss 仅增一次, FlowCacheHit ≥ 1
 ```
 
 ### 本地代理模拟
@@ -507,7 +541,7 @@ Level 2（本地验证）：
 |--------|------|------|--------|
 | M0: 构建通过 | Day 2 | — | `make build` 编译成功 |
 | M1: eBPF 数据面 | Day 10 | L1 | TC Hook attach + Flow Map + CIDR 白名单 + 统计 |
-| M2: TProxy + Conntrack | Day 16 | L2 | TCP TProxy + Decision + Conntrack Writeback + Flow Learning 闭环 |
+| M2: TProxy + Conntrack | Day 16 | L2 | TCP TProxy + Decision + 混合Key Flow Cache Writeback + Flow Learning 闭环 |
 | M3: 多协议代理 | Day 22 | L2 | sing-box 本地集成 + 节点故障切换 |
 | M4: DNS 分流 | Day 26 | L2 | 透明劫持 + 分流决策 + 本机隔离 |
 | M5: 生产就绪 | Day 35 | L2→L3 | 全部系统测试通过，树莓派验证通过 |
