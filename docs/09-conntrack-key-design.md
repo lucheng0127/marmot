@@ -126,7 +126,126 @@ struct flow_key_lite key = {
 
 ---
 
-## 4. TCP 场景对比分析
+## 3A. 混合方案：TCP 降维 + UDP 保留 5-tuple ⭐
+
+### 3A.1 定义
+
+**单一降维 key 的问题在于：它对 TCP 安全，但对 UDP 有风险。** 因此引出第三种方案：
+
+```
+TCP: Key = {src_ip, dst_ip, dst_port, proto}            ← 降维 (去 src_port)
+UDP: Key = {src_ip, src_port, dst_ip, dst_port, proto}  ← 完整 5-tuple
+```
+
+**核心思想：按传输协议类型使用不同的 key schema。** 不追求统一，追求按需最优。
+
+### 3A.2 理由
+
+| 考量 | TCP | UDP |
+|------|-----|-----|
+| 连接状态 | 有状态 (SYN/FIN/RST 明确生命周期) | 无状态 (无连接信号) |
+| src_port 随机性 | 每次连接随机分配 | 每次请求随机分配 |
+| 同目标决策一致性 | ✅ 完全一致（client→target 始终相同） | ❌ 可能不同（对称 NAT 重新映射） |
+| 多路复用风险 | 🟢 低（单 TCP 连接内有序） | 🔴 高（QUIC 应用层多路复用） |
+| 降维安全性 | 🟢 安全 | 🔴 有风险 |
+| 降维必要性 | 🟢 收益高（短连接场景 HIT rate 提升显著） | 🟡 收益低（UDP 流量占比小） |
+
+### 3A.3 eBPF 实现方式
+
+需要**两个独立的 BPF HASH Map**：
+
+```c
+// TCP Flow Map — 降维 key (去 src_port)
+struct flow_key_tcp {
+    __u32 src_ip;
+    __u32 dst_ip;
+    __u16 dst_port;
+    __u8  protocol;   // 始终为 6 (IPPROTO_TCP)
+    __u8  pad;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 65536);
+    __type(key, struct flow_key_tcp);
+    __type(value, struct flow_value);
+} tcp_flow_map SEC(".maps");
+
+// UDP Flow Map — 完整 5-tuple
+struct flow_key_full {
+    __u32 src_ip;
+    __u32 dst_ip;
+    __u16 src_port;
+    __u16 dst_port;
+    __u8  protocol;
+    __u8  pad;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);        // UDP 连接少，小容量
+    __type(key, struct flow_key_full);
+    __type(value, struct flow_value);
+} udp_flow_map SEC(".maps");
+```
+
+**eBPF 查找逻辑**：
+
+```c
+static __always_inline int lookup_flow(struct __sk_buff *skb,
+                                        struct iphdr *ip,
+                                        struct tcphdr *tcp) {
+    if (ip->protocol == IPPROTO_TCP) {
+        struct flow_key_tcp key = {
+            .src_ip   = ip->saddr,
+            .dst_ip   = ip->daddr,
+            .dst_port = tcp->dest,
+            .protocol = IPPROTO_TCP,
+        };
+        struct flow_value *val = bpf_map_lookup_elem(&tcp_flow_map, &key);
+        if (val) return val->action;
+    } else if (ip->protocol == IPPROTO_UDP) {
+        struct udphdr *udp = (void *)ip + (ip->ihl * 4);
+        struct flow_key_full key = {
+            .src_ip   = ip->saddr,
+            .dst_ip   = ip->daddr,
+            .src_port = udp->source,
+            .dst_port = udp->dest,
+            .protocol = IPPROTO_UDP,
+        };
+        struct flow_value *val = bpf_map_lookup_elem(&udp_flow_map, &key);
+        if (val) return val->action;
+    }
+    return -1;  // MISS
+}
+```
+
+### 3A.4 预期效果对比
+
+```
+TCP 场景:
+  curl http://1.2.3.4:8080 (连接1, src_port=A) → MISS → proxy → 写 tcp_flow_map
+  curl http://1.2.3.4:8080 (连接2, src_port=B) → HIT  ← 降维后命中 (同目标)
+  curl http://1.2.3.4:8080 (连接3, src_port=C) → HIT  ← 继续命中
+  → HIT rate 从 ~30% 提升到 ~70% ✅
+
+UDP 场景:
+  dig @8.8.8.8 (src_port=X)  → MISS → 写入 udp_flow_map (完整 5-tuple)
+  dig @8.8.8.8 (src_port=Y)  → MISS  ← 不同 src_port, 仍 MISS (安全, 不误合并)
+  → 与 5-tuple 方案行为完全一致 ✅
+```
+
+### 3A.5 工程代价
+
+| 代价项 | 说明 | 严重程度 |
+|--------|------|---------|
+| 两个 BPF Map | TCP + UDP 各一个，增加指令数 | 🟢 轻 (增加 ~15 条 BPF 指令) |
+| 条件分支 | eBPF 中根据 proto 选择 map | 🟢 轻 (一个 branch) |
+| 用户态写入 | SyncManager 需根据 proto 选择 map | 🟢 轻 (Go 中一个 switch) |
+| Conntrack Cache 修改 | 写入时区分 TCP/UDP key 格式 | 🟡 中 (改 Insert 方法) |
+| Conntrack  | 仍用统一 5-tuple, 无需修改 | 🟢 无 |
+
+---
 
 ### 4.1 正确性：降维在 TCP 上安全吗？
 
@@ -326,7 +445,25 @@ goroutine B: Insert(key=K, decision=direct)
 3. **策略路由加速**: fwmark 决策基于目标，不依赖 src_port → 降维安全
 4. **CDN 缓存节点**: 流量转发决策 -> 降维安全
 
-### 9.3 分界线总结
+### 9.3 适用方案 C：TCP 降维 + UDP 5-tuple ⭐
+
+这是 Marmot **推荐的折中方案**：
+
+```
+TCP: 降维 key {src_ip, dst_ip, dst_port, proto}
+UDP: 5-tuple   {src_ip, src_port, dst_ip, dst_port, proto}
+```
+
+| 场景 | 安全性 | 理由 |
+|------|--------|------|
+| TCP 短连接 (HTTP) | 🟢 高 | 降维安全，同目标决策一致 |
+| TCP 长连接 (gRPC/WS) | 🟢 高 | 降维安全，跨连接共享 |
+| TCP 多租户 | 🟢 高 | src_ip 仍在 key 中 |
+| UDP DNS | 🟢 高 | 5-tuple 精确追踪 |
+| UDP QUIC/HTTP3 | 🟢 高 | 5-tuple 防止 QUIC 多路复用污染 |
+| UDP 对称 NAT | 🟢 高 | 5-tuple 保持 NAT 映射准确性 |
+
+### 9.4 分界线总结
 
 ```
 src_port 是否影响决策?
@@ -343,26 +480,29 @@ Marmot 透明代理场景：**src_port 不影响决策** → 降维可行。
 
 ## 10. 决策建议
 
-### 10.1 推荐方案：降维 Key (去 src_port)
+### 10.1 推荐方案 C：TCP 降维 + UDP 5-tuple (混合方案) ⭐
 
-**明确推荐：Marmot Fast Path Cache 使用降维 Key。**
+**明确推荐：Marmot Fast Path Cache 使用混合 Key 方案。**
 
 ```
-Key = {src_ip, dst_ip, dst_port, proto}
+TCP: Key = {src_ip, dst_ip, dst_port, proto}         → 降维
+UDP: Key = {src_ip, src_port, dst_ip, dst_port, proto} → 5-tuple
 ```
 
 ### 10.2 理由
 
-1. **决策不依赖 src_port**：Marmot 的决策基于目标地址和 CIDR 规则，与客户端端口无关
-2. **短连接场景显著提升 HIT rate**：从 "永不命中跨连接" 到 "同目标共享"
-3. **NAT 安全**：`src_ip` 仍在 key 中，不同客户端仍可区分
-4. **UDP 风险可控**：UDP 在降维中保留 dst_port，仅合并 src_port；QUIC/HTTP3 在同一目标端口，降维无新增风险
+1. **TCP 收益最大化**：降维后短连接场景 HIT rate 从 ~30% 提升到 ~70%
+2. **UDP 风险彻底避免**：对称 NAT、QUIC 多路复用、应用层混淆全部保持 5-tuple 隔离
+3. **工程代价可控**：仅需两个 BPF Map + 一个 proto 条件分支
+4. **Conntrack 无需修改**：session tracking 层始终使用 5-tuple
+5. **与 Marmot 流量特征匹配**：TCP 占流量 >90%，是优化的主要目标
 
-### 10.3 不推荐
+### 10.3 备选方案（不推荐）
 
-- ❌ **不建议保留 5-tuple**：无法解决跨连接 Flow HIT 问题
-- ❌ **不建议完全删除 dst_port**：不同端口的服务策略可能不同
-- ❌ **不建议删除 src_ip**：多租户场景必须
+| 方案 | 适用场景 | 不推荐理由 |
+|------|---------|-----------|
+| A: 统一 5-tuple | 状态防火墙 | Marmot 透明代理不需要 src_port 精度 |
+| B: 统一降维 | 纯 TCP 代理 | UDP 对称 NAT 场景不安全 |
 
 ### 10.4 特殊情况处理
 
@@ -434,7 +574,7 @@ pkg/cache/        → 新增 Layer 2 (fast path, 降维 key)
 ### 11.4 代码级 Key 定义
 
 ```go
-// Layer 1: Conntrack (session tracking)
+// Layer 1: Conntrack (session tracking) — 统一 5-tuple
 type ConnKey struct {
     SrcIP    uint32
     SrcPort  uint16
@@ -443,12 +583,36 @@ type ConnKey struct {
     Protocol uint8
 }
 
-// Layer 2: Flow Cache (fast path decision)
-type FlowKey struct {
+// Layer 2: Fast Path Cache — 按协议区分 key schema
+
+// TCP Flow Cache Key — 降维 (去 src_port)
+type TCPFlowKey struct {
     SrcIP    uint32
     DstIP    uint32
     DstPort  uint16
-    Protocol uint8
+    Protocol uint8  // always 6
+}
+
+// UDP Flow Cache Key — 完整 5-tuple
+type UDPFlowKey struct {
+    SrcIP    uint32
+    SrcPort  uint16
+    DstIP    uint32
+    DstPort  uint16
+    Protocol uint8  // always 17
+}
+
+// 通用写入接口 — 根据 protocol 选择对应 map
+func WriteFlowCache(proto uint8, srcIP, dstIP uint32, srcPort, dstPort uint16, action uint8) error {
+    switch proto {
+    case 6: // TCP
+        key := TCPFlowKey{SrcIP: srcIP, DstIP: dstIP, DstPort: dstPort, Protocol: 6}
+        return tcpFlowMap.Put(&key, &FlowValue{Action: action})
+    case 17: // UDP
+        key := UDPFlowKey{SrcIP: srcIP, SrcPort: srcPort, DstIP: dstIP, DstPort: dstPort, Protocol: 17}
+        return udpFlowMap.Put(&key, &FlowValue{Action: action})
+    }
+    return nil
 }
 ```
 
@@ -465,19 +629,19 @@ Phase 5:          Conntrack Cache = 5-tuple + Rule Engine
 
 ## 附录 A：对比总表
 
-| 对比维度 | 5-tuple Key | 降维 Key (去 src_port) |
-|---------|------------|----------------------|
-| **精度** | 🟢 最高 — 唯一标识每条连接 | 🟡 中 — 合并同 client 同目标连接 |
-| **跨连接 HIT** | ❌ 永不 | ✅ 同目标共享 |
-| **短连接 HIT rate** | 🟢 ~30% (同连接内多包) | 🟢 ~70% (首次 MISS, 后续全 HIT) |
-| **长连接 HIT rate** | 🟢 >99% | 🟢 >99% |
-| **BPF Map 占用** | 🟡 每连接一个 entry | 🟢 每目标一个 entry |
-| **NAT 安全性** | 🟢 完全隔离 | 🟡 同源同目标共享 (决策一致时安全) |
-| **UDP 安全性** | 🟢 完全隔离 | 🟡 风险中高 (对称 NAT 场景) |
-| **多租户安全性** | 🟢 完全隔离 | 🟢 src_ip 仍在 key 中 |
-| **conntrack 一致性** | 🟢 一致 | 🟡 需分离两层 key |
-| **工程复杂度** | 🟢 低 | 🟡 中 (需两层 map 管理) |
-| **推荐场景** | 状态防火墙 / NAT 网关 | 透明代理 / 策略路由加速 |
+| 对比维度 | A: 统一 5-tuple | B: 统一降维 | **C: TCP降维+UDP 5-tuple ⭐** |
+|---------|------------|----------------------|--------------------------|
+| **精度** | 🟢 最高 | 🟡 中 | 🟢 高 (TCP降维/UDP 5-tuple) |
+| **跨连接 HIT** | ❌ 永不 | ✅ 同目标共享 | ✅ **TCP共享,UDP精确** |
+| **短连接 HIT rate** | ~30% | ~70% | **~70% (TCP为主)** |
+| **长连接 HIT rate** | >99% | >99% | >99% |
+| **BPF Map 占用** | 🟡 每连接1 entry | 🟢 每目标1 entry | 🟢 TCP压缩, UDP精确 |
+| **NAT 安全性** | 🟢 完全隔离 | 🟡 同源共享 | 🟢 TCP共享安全/UDP隔离 |
+| **UDP 安全性** | 🟢 完全隔离 | 🔴 对称NAT风险 | 🟢 **保持5-tuple隔离** |
+| **多租户安全性** | 🟢 完全隔离 | 🟢 src_ip在key中 | 🟢 同上 |
+| **conntrack 一致性** | 🟢 一致 | 🟡 需分离 | 🟡 需分离(conntrack仍5-tuple) |
+| **工程复杂度** | 🟢 低 | 🟡 中 | 🟡 **中 (两个BPF map)** |
+| **推荐场景** | 状态防火墙/NAT网关 | 纯TCP代理 | **Marmot 透明代理** |
 
 ---
 
@@ -503,9 +667,14 @@ Phase 5:          Conntrack Cache = 5-tuple + Rule Engine
     └──────────────────┘          └──────────────────────┘
                                              │
                                              ▼
-                                    ┌──────────────────────┐
-                                    │ Marmot 推荐方案       │
-                                    │ Conntrack: 5-tuple    │
-                                    │ Flow BPF Map: 降维    │
-                                    └──────────────────────┘
+                                             ┌──────────────────────────┐
+                                             │ Marmot 推荐方案 C         │
+                                             │                          │
+                                             │ Conntrack: 统一 5-tuple   │
+                                             │ TCP Flow: 降维 key        │
+                                             │ UDP Flow: 5-tuple         │
+                                             │                          │
+                                             │ TCP HIT rate: ~70% ✅    │
+                                             │ UDP 安全性: 完整保证 ✅  │
+                                             └──────────────────────────┘
 ```
