@@ -16,7 +16,7 @@
 | 4 | [模块划分设计](04-modules.md) | 目录结构、模块依赖、初始化顺序 | ✅ |
 | 5 | [架构决策记录](05-adr.md) | 4 个关键 ADR | ✅ |
 | 6 | [风险分析](06-risks.md) | 6 项风险 + 缓解措施 | ✅ |
-| 7 | [开发计划](07-development-plan.md) | 测试环境分级(L1/L2/L3) + 开发验证原则 + 本地代理模拟 | ✅ |
+| 8 | [Bridge TC Path Investigation](08-bridge-tc-path-investigation.md) | Hook Point 分析对比 + 最终推荐方案 | ✅ |
 
 ---
 
