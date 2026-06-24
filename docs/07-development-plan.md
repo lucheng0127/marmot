@@ -218,6 +218,7 @@ bpftool / tc / ip 等工具输出
 | 1.8 | 统计 BPF Map (ARRAY) | `pkg/bpf/maps.go` | 2h |
 | 1.9 | 策略路由脚本（ip rule/ip route）| `pkg/tproxy/routing.go` | 3h |
 | 1.10 | eBPF 数据面基本通路测试（直连 vs mark）| 测试报告 | 4h |
+| 1.11 | CIDR Functional Verification（LPM_TRIE 验证 + CIDR命中/不命中/MARK行为确认 + Bridge TC路径分析）| 调研报告 | 4h |
 
 ### 关键交付物
 - eBPF 程序可编译并加载到网桥接口
@@ -506,14 +507,14 @@ Level 2（本地验证）：
 |--------|------|------|--------|
 | M0: 构建通过 | Day 2 | — | `make build` 编译成功 |
 | M1: eBPF 数据面 | Day 10 | L1 | TC Hook attach + Flow Map + CIDR 白名单 + 统计 |
-| M2: TProxy + Conntrack | Day 16 | L2 | Flow Cache → TProxy → Xray → 本地 HTTP 链路 |
+| M2: TProxy + Conntrack | Day 16 | L2 | TCP TProxy + Decision + Conntrack Writeback + Flow Learning 闭环 |
 | M3: 多协议代理 | Day 22 | L2 | sing-box 本地集成 + 节点故障切换 |
 | M4: DNS 分流 | Day 26 | L2 | 透明劫持 + 分流决策 + 本机隔离 |
 | M5: 生产就绪 | Day 35 | L2→L3 | 全部系统测试通过，树莓派验证通过 |
 
 ---
 
-## 7.11 第一阶段不包含的内容
+## 7.11 不包含的内容
 
 - ❌ HTTP API 控制面（Phase 5 仅骨架）
 - ❌ 负载均衡（Phase 2 仅基础 fallback）
