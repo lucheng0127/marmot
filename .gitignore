@@ -22,6 +22,7 @@ vendor/
 # BPF generated
 bpf_bpf*
 *.o
+!pkg/bpf/marmot_bpf*.o
 *.ll
 
 # Misc
