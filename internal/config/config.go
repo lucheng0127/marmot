@@ -9,13 +9,13 @@ import (
 
 // Config is the root configuration structure for marmot.
 type Config struct {
-	Log      LogConfig      `yaml:"log"`
-	Proxy    ProxyConfig    `yaml:"proxy"`
-	DNS      DNSConfig      `yaml:"dns"`
-	TProxy   TProxyConfig   `yaml:"tproxy"`
-	BPF      BPFConfig      `yaml:"bpf"`
-	API      APIConfig      `yaml:"api"`
-	Rules    []RuleConfig   `yaml:"rules"`
+	Log    LogConfig    `yaml:"log"`
+	Proxy  ProxyConfig  `yaml:"proxy"`
+	DNS    DNSConfig    `yaml:"dns"`
+	TProxy TProxyConfig `yaml:"tproxy"`
+	BPF    BPFConfig    `yaml:"bpf"`
+	API    APIConfig    `yaml:"api"`
+	Rules  []RuleConfig `yaml:"rules"`
 }
 
 // LogConfig defines logging configuration.
@@ -32,8 +32,8 @@ type ProxyConfig struct {
 
 // ProxyGroup is a named group of proxy nodes sharing the same outbound tag.
 type ProxyGroup struct {
-	Tag   string       `yaml:"tag"`
-	Nodes []ProxyNode  `yaml:"nodes"`
+	Tag   string      `yaml:"tag"`
+	Nodes []ProxyNode `yaml:"nodes"`
 }
 
 // ProxyNode defines a single proxy upstream node.
@@ -74,8 +74,8 @@ type TProxyConfig struct {
 
 // BPFConfig defines eBPF program configuration.
 type BPFConfig struct {
-	Interface      string `yaml:"interface"`       // bridge interface name (br0)
-	CIDRWhitelist  []string `yaml:"cidr_whitelist"` // CIDR entries for direct bypass
+	Interface     string   `yaml:"interface"`      // bridge interface name (br0)
+	CIDRWhitelist []string `yaml:"cidr_whitelist"` // CIDR entries for direct bypass
 }
 
 // APIConfig defines HTTP API server configuration.
@@ -87,9 +87,9 @@ type APIConfig struct {
 
 // RuleConfig defines a single routing rule.
 type RuleConfig struct {
-	Type   string      `yaml:"type"`   // domain, domain_suffix, domain_keyword, ip, geoip, geosite, default
-	Match  string      `yaml:"match"`  // match value
-	Action RuleAction  `yaml:"action"`
+	Type   string     `yaml:"type"`  // domain, domain_suffix, domain_keyword, ip, geoip, geosite, default
+	Match  string     `yaml:"match"` // match value
+	Action RuleAction `yaml:"action"`
 }
 
 // RuleAction defines what to do when a rule matches.
