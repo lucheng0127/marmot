@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feature/**', 'fix/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build (linux/amd64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/marmot ./cmd/marmot/
+
+      - name: Cross-compile (linux/arm)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -o build/marmot-arm ./cmd/marmot/
+
+      - name: Cross-compile (linux/arm64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o build/marmot-arm64 ./cmd/marmot/
+
+      - name: Tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum || (echo "go.mod or go.sum is dirty — run 'go mod tidy'" && exit 1)
+
+      - name: go vet
+        run: go vet ./...

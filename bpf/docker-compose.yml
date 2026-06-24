@@ -1,0 +1,15 @@
+services:
+  bpf-builder:
+    image: debian:bookworm
+    container_name: marmot-bpf-builder
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace
+    command: >
+      bash -c "
+        apt-get update &&
+        apt-get install -y clang llvm libbpf-dev linux-headers-generic make pkg-config &&
+        echo 'BPF build environment ready'
+      "
+    stdin_open: true
+    tty: true

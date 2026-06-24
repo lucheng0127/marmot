@@ -1,0 +1,60 @@
+# marmot default configuration
+# See docs/ for full documentation
+
+log:
+  level: info
+  format: text
+  output: stdout
+
+tproxy:
+  tcp_addr: ":1080"
+  udp_addr: ":1080"
+
+dns:
+  listen: ":53"
+  local_listen: "127.0.0.1:53"
+  cache_size: 4096
+  upstreams:
+    - tag: "domestic"
+      protocol: "udp"
+      addr: "114.114.114.114:53"
+    - tag: "domestic-backup"
+      protocol: "udp"
+      addr: "223.5.5.5:53"
+    - tag: "oversea"
+      protocol: "doh"
+      addr: "https://1.1.1.1/dns-query"
+    - tag: "oversea-backup"
+      protocol: "dot"
+      addr: "tls://8.8.8.8:853"
+
+bpf:
+  interface: "br0"
+  cidr_whitelist:
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+    - "127.0.0.0/8"
+
+api:
+  listen: ":8080"
+  enable: false
+
+rules:
+  - type: geoip
+    match: "CN"
+    action:
+      mode: direct
+  - type: geosite
+    match: "cn"
+    action:
+      mode: direct
+  - type: geosite
+    match: "geolocation-!cn"
+    action:
+      mode: proxy
+      tag: "auto"
+  - type: default
+    action:
+      mode: proxy
+      tag: "auto"
