@@ -218,6 +218,7 @@ bpftool / tc / ip 等工具输出
 | 1.8 | 统计 BPF Map (ARRAY) | `pkg/bpf/maps.go` | 2h |
 | 1.9 | 策略路由脚本（ip rule/ip route）| `pkg/tproxy/routing.go` | 3h |
 | 1.10 | eBPF 数据面基本通路测试（直连 vs mark）| 测试报告 | 4h |
+| 1.11 | CIDR Functional Verification（LPM_TRIE 验证 + CIDR命中/不命中/MARK行为确认 + Bridge TC路径分析）| 调研报告 | 4h |
 
 ### 关键交付物
 - eBPF 程序可编译并加载到网桥接口
@@ -236,8 +237,7 @@ Level 1（netns + veth + bridge）：
 6. Flow Statistics 全部计数器正常工作
 ```
 
-> 注意：bridge L2 转发流量的 CIDR 命中需要将 BPF 挂载到 slave port（Phase 2 实现）。
-> Phase 1 仅验证 Go ↔ BPF Map 通信正确性 + 统计计数器正常。
+> 注意：Phase 1 仅验证 Go ↔ BPF Map 通信正确性 + 统计计数器正常。已完成验证。
 
 ### 不要求
 - ❌ 不要求 bridge forwarding 场景的 CIDR 命中
@@ -251,37 +251,117 @@ Level 1（netns + veth + bridge）：
 ### 级别：Level 2（集成验证）
 
 ### 目标
-实现 TCP/UDP TProxy 监听 + Conntrack Fast Cache（Flow Cache 用户态管理）
+实现 **TCP TProxy + SO_ORIGINAL_DST + Conntrack Cache + Flow Cache Writeback** 闭环
+
+核心价值：
+- 建立 Slow Path（TProxy 接收 → Decision → Conntrack Cache）
+- 建立 Fast Path（Conntrack Cache → BPF Flow Map Writeback → 内核态直处理）
+- 完成 Flow Learning（首次 MISS → Decision → 写入 → 后续 HIT）
 
 ### 任务清单
 
 | # | 任务 | 产出 | 预计工时 |
 |---|------|------|---------|
-| 2.1 | TCP TProxy 监听器（SO_ORIGINAL_DST）| `pkg/tproxy/tcp.go` | 6h |
-| 2.2 | UDP TProxy 监听器 | `pkg/tproxy/udp.go` | 4h |
-| 2.3 | 原始目标地址提取封装 | `pkg/tproxy/conn.go` | 3h |
+| 2.1 | TCP TProxy 监听器（SO_ORIGINAL_DST）| `pkg/tproxy/tcp.go` | 8h |
+| 2.2 | 原始目标地址提取封装 | `pkg/tproxy/conn.go` | 3h |
+| 2.3 | Decision Interface 抽象（Direct/Proxy 两种决策）| `pkg/tproxy/decision.go` | 2h |
 | 2.4 | Conntrack Cache 主结构（FlowKey/FlowEntry）| `pkg/conntrack/cache.go` | 6h |
-| 2.5 | Conntrack GC + LRU 淘汰 | `pkg/conntrack/cache.go` | 4h |
+| 2.5 | Conntrack GC + 淘汰策略 | `pkg/conntrack/cache.go` | 4h |
 | 2.6 | BPF Map 同步逻辑（Insert/Delete/Update）| `pkg/conntrack/sync.go` | 6h |
-| 2.7 | TProxy 内 Rule Engine 调用集成 | `pkg/tproxy/` | 4h |
-| 2.8 | 端到端 Fast/Slow Path 测试 | 测试报告 | 4h |
+| 2.7 | Fast Path Workflow 集成（TProxy → Decision → Cache → BPF Map）| 集成代码 | 4h |
+| 2.8 | 端到端 Fast/Slow Path 测试（含 Flow Learning 验证）| 测试报告 | 4h |
 
 ### 关键交付物
-- TCP/UDP TProxy 正常运行
-- Conntrack Cache 可缓存 Flow 决策
-- Flow BPF Map 同步正常，Fast Path 生效
+- TCP TProxy 正常运行（SO_ORIGINAL_DST 可正确提取原始目标地址）
+- Decision Interface 提供 Direct / Proxy 两种决策
+- Conntrack Cache 可缓存 Flow 决策（仅缓存 Decision，不含 Rule/Domain/DNS 信息）
+- Flow BPF Map Writeback 同步正常
+- Fast / Slow Path 闭环验证（首次 MISS → 后续 HIT）
+
+---
+
+### Conntrack Cache Scope ⭐
+
+Conntrack Cache 职责：**仅缓存 Flow 决策**，禁止扩展为 Rule Cache。
+
+```go
+// FlowKey — 5-tuple 连接标识
+type FlowKey struct {
+    SrcIP    net.IP
+    DstIP    net.IP
+    SrcPort  uint16
+    DstPort  uint16
+    Protocol uint8
+}
+
+// FlowEntry — 仅缓存决策结果
+type FlowEntry struct {
+    Decision Decision  // Direct / Proxy
+    LastSeen time.Time
+}
+
+// Decision — 简化决策结果
+type Decision uint8
+
+const (
+    DecisionDirect Decision = iota
+    DecisionProxy
+)
+```
+
+**禁止在 Conntrack Cache 中存储**：
+- ❌ Domain / Hostname
+- ❌ GeoIP / GeoSite 结果
+- ❌ Rule ID / Rule Type
+- ❌ DNS Metadata
+- ❌ 任何路由规则上下文
+
+---
+
+### Fast Path Workflow ⭐
+
+**第一次访问（Slow Path — 建立 Flow）**：
+
+```
+Client → br0(TC) → FlowMap Miss → fwmark=1
+    → Policy Route → TProxy
+    → SO_ORIGINAL_DST → Decision Interface
+    → Conntrack Cache.Insert(FlowKey, Decision)
+    → BPF Flow Map Writeback
+    → 返回数据给 Client
+    ─── 统计: FlowCacheMiss++
+```
+
+**第二次访问（Fast Path — 命中缓存）**：
+
+```
+Client → br0(TC) → FlowMap Hit
+    → 读取 decision
+    → Direct: 内核转发，不设 fwmark
+    → Proxy: 设 fwmark=1 → TProxy
+    ─── 统计: FlowCacheHit++
+```
+
+**目标**：每 Flow 仅**一次**用户态决策，后续包全部内核态 Fast Path。
 
 ### 验证标准
 
 ```
 Level 2（本地 Xray 模拟代理）：
-1. TProxy :1080 启动正常，可接收 fwmark=1 的流量
-2. ns-client → br-test(TC) → TProxy → Xray(dokodemo→freedom) → 本地 HTTP 服务
-3. 原始目标地址正确提取（SO_ORIGINAL_DST / IP_RECVORIGDSTADDR）
+
+基础验证：
+1. TCP TProxy :1080 启动正常，可接收 fwmark=1 的流量
+2. SO_ORIGINAL_DST 可正确提取原始目标地址
+3. ns-client → br-test(TC) → TProxy → Xray(dokodemo→freedom) → 本地 HTTP 服务
 4. Conntrack Cache Insert/Delete/Lookup 正常
-5. Flow BPF Map 同步正常（bpftool map dump 可见 flow entry）
-6. GC 能清理过期 entry
-7. Fast Path 生效（再次访问同一目标命中 Flow Cache）
+5. GC 能清理过期 entry
+
+Flow Learning 验证（核心验收项）：
+6. 第一次访问目标 A → 统计 FlowCacheMiss++
+7. FlowMap Writeback 确认 → bpftool/map dump 可见新 flow entry
+8. 第二次访问目标 A → 统计 FlowCacheHit++
+   (无需再次进入用户态 Decision)
+9. 验证: FlowCacheMiss 仅增一次，FlowCacheHit ≥ 1
 ```
 
 ### 本地代理模拟
@@ -310,11 +390,13 @@ Level 2（本地 Xray 模拟代理）：
 | 3.7 | SS/VMess/VLESS/Trojan 各协议集成测试 | 测试报告 | 4h |
 | 3.8 | 多节点配置 + 故障自动切换测试 | 测试报告 | 3h |
 | 3.9 | 热重载配置 + 平滑切换 | `pkg/proxy/options.go` | 4h |
+| 3.10 | UDP TProxy（从 Phase 2 推迟）| `pkg/tproxy/udp.go` | 4h |
 
 ### 关键交付物
 - sing-box 作为 library 正常运行
 - TProxy → sing-box outbound → 远程服务器
 - 多节点支持 + 健康检查自动切换
+- UDP TProxy 支持（从 Phase 2 推迟）
 
 ### 验证标准
 
@@ -399,10 +481,11 @@ Level 2（本地验证）：
 | 5.11 | MatchResult + 匹配 Trace（可观测性）| `pkg/observe/match_trace.go` | 4h |
 | 5.12 | 规则命中统计 | `pkg/observe/stats.go` | 2h |
 | 5.13 | Debug 模式 + 排查 API | `pkg/observe/debug.go` | 3h |
-| 5.14 | 端到端集成测试（全链路）| 自动化测试套件 | 8h |
-| 5.15 | 树莓派交叉编译与部署测试 | 树莓派验证报告 | 4h |
-| 5.16 | 性能基准测试（wrk/iperf3）| 性能报告 | 4h |
-| 5.17 | 文档完善（README + 配置说明 + 部署指南）| 文档更新 | 4h |
+| 5.14 | Decision Interface → Rule Engine 集成（替换 Phase 2 的 bare Decision）| `pkg/tproxy/` | 4h |
+| 5.15 | 端到端集成测试（全链路）| 自动化测试套件 | 8h |
+| 5.16 | 树莓派交叉编译与部署测试 | 树莓派验证报告 | 4h |
+| 5.17 | 性能基准测试（wrk/iperf3）| 性能报告 | 4h |
+| 5.18 | 文档完善（README + 配置说明 + 部署指南）| 文档更新 | 4h |
 
 ### 规则优先级
 ```
@@ -424,14 +507,14 @@ Level 2（本地验证）：
 |--------|------|------|--------|
 | M0: 构建通过 | Day 2 | — | `make build` 编译成功 |
 | M1: eBPF 数据面 | Day 10 | L1 | TC Hook attach + Flow Map + CIDR 白名单 + 统计 |
-| M2: TProxy + Conntrack | Day 16 | L2 | Flow Cache → TProxy → Xray → 本地 HTTP 链路 |
+| M2: TProxy + Conntrack | Day 16 | L2 | TCP TProxy + Decision + Conntrack Writeback + Flow Learning 闭环 |
 | M3: 多协议代理 | Day 22 | L2 | sing-box 本地集成 + 节点故障切换 |
 | M4: DNS 分流 | Day 26 | L2 | 透明劫持 + 分流决策 + 本机隔离 |
 | M5: 生产就绪 | Day 35 | L2→L3 | 全部系统测试通过，树莓派验证通过 |
 
 ---
 
-## 7.11 第一阶段不包含的内容
+## 7.11 不包含的内容
 
 - ❌ HTTP API 控制面（Phase 5 仅骨架）
 - ❌ 负载均衡（Phase 2 仅基础 fallback）
