@@ -10,10 +10,10 @@
 ```
 Phase 0 ─ 环境与骨架                     （第 1-2 天）
 Phase 1 ─ eBPF 数据面 + Flow Cache       （第 3-10 天）
-Phase 2 ─ TProxy + Conntrack Cache       （第 11-16 天）
+Phase 2 ─ TProxy + 用户态决策缓存     （第 11-16 天）
 Phase 3 ─ sing-box 引擎 + 节点管理       （第 17-22 天）
 Phase 4 ─ DNS 子系统   ⭐ 简化版         （第 23-26 天）
-Phase 5 ─ 规则引擎 + 可观测性 + 整合     （第 27-35 天）
+Phase 5 ─ 规则引擎 + eBPF Fast Path      （第 27-38 天）
 ```
 
 ---
@@ -222,8 +222,12 @@ bpftool / tc / ip 等工具输出
 
 ### 关键交付物
 - eBPF 程序可编译并加载到网桥接口
-- Flow Cache 预分类路径正常工作（命中/未命中/过期）
+- CIDR 直连白名单 + fwmark=1 策略路由（基本信息面）
+- CIDR Functional Verification 完成（LPM_TRIE 验证 + 命中/不命中/MARK 行为确认）
 - 策略路由配置自动化
+
+> 注：Phase 1 实现了 eBPF Flow Cache 原型，但当前 Phase 2 使用 StaticDecider（恒 proxy），eBPF Flow Cache 无实际收益。
+> 已在 Phase 2 中移除，将在 Phase 5（Rule Engine 引入多决策后）重新引入。
 
 ### 验证标准
 
@@ -246,136 +250,99 @@ Level 1（netns + veth + bridge）：
 
 ---
 
-## 7.6 Phase 2：TProxy + Conntrack Cache（第 11-16 天）
+## 7.6 Phase 2：TProxy + 用户态决策缓存（第 11-16 天）
 
 ### 级别：Level 2（集成验证）
 
 ### 目标
-实现 **TCP TProxy + SO_ORIGINAL_DST + Conntrack Cache + Flow Cache Writeback** 闭环
+实现 **TCP TProxy + SO_ORIGINAL_DST + 用户态 Decision Cache**，建立完整 Slow Path。
 
 核心价值：
-- 建立 Slow Path（TProxy 接收 → Decision → Conntrack Cache）
-- 建立 Fast Path（Conntrack Cache → BPF Flow Map Writeback → 内核态直处理）
-- 完成 Flow Learning（首次 MISS → Decision → 写入 → 后续 HIT）
+- eBPF 仅做 CIDR 白名单 + fwmark=1 策略路由（去除了当前无实际收益的 eBPF Flow Cache）
+- TProxy 接收流量 → Decision → 用户态缓存（跨连接共享，纯目标 key）
+- Phase 5 当 Rule Engine 引入多决策（direct/proxy）后，再重新引入 eBPF Flow Cache
+
+```
+设计依据:
+  Phase 2 只有 StaticDecider (恒 proxy), eBPF Flow Cache 无任何实际收益
+  所有流量都经过 fwmark=1 → TProxy, cache 应放在 TProxy 用户态
+  Phase 5 有了 Rule Engine 产生 direct 决策后, eBPF Flow Cache 才有价值
+```
 
 ### 任务清单
 
 | # | 任务 | 产出 | 预计工时 |
 |---|------|------|---------|
-| 2.1 | TCP TProxy 监听器（SO_ORIGINAL_DST）| `pkg/tproxy/tcp.go` | 8h |
+| 2.1 | TCP TProxy 监听器（SO_ORIGINAL_DST + IP_TRANSPARENT）| `pkg/tproxy/tcp.go` | 8h |
 | 2.2 | 原始目标地址提取封装 | `pkg/tproxy/conn.go` | 3h |
 | 2.3 | Decision Interface 抽象（Direct/Proxy 两种决策）| `pkg/tproxy/decision.go` | 2h |
-| 2.4 | Conntrack Cache 主结构（FlowKey/FlowEntry）| `pkg/conntrack/cache.go` | 6h |
-| 2.5 | Conntrack GC + 淘汰策略 | `pkg/conntrack/cache.go` | 4h |
-| 2.6 | BPF Map 同步逻辑（Insert/Delete/Update）— **Phase 2a: 统一 5-tuple** | `pkg/conntrack/sync.go` | 4h |
-| 2.7 | Fast Path Workflow 集成（TProxy → Decision → Cache → BPF Map）| 集成代码 | 4h |
-| 2.8 | 端到端 Fast/Slow Path 测试（含 Flow Learning 验证）| 测试报告 | 4h |
-| 2.9 | ⭐ **混合 Key BPF Map 重构** — TCP 降维 + UDP 5-tuple 双 Map 方案 | `pkg/bpf/maps.go`, `pkg/conntrack/sync.go` | 6h |
+| 2.4 | 用户态 Decision Cache（纯目标 key: {dst_ip, dst_port, proto}, TTL + 淘汰）| `pkg/conntrack/cache.go` | 6h |
+| 2.5 | TProxy → Decision → Cache 集成 | `pkg/tproxy/` | 4h |
+| 2.6 | TCP socket relay（接收 → 转发 → 回写 — 占位, Phase 3 对接 sing-box）| `pkg/tproxy/relay.go` | 4h |
+| 2.7 | 策略路由 + iptables TPROXY 自动化 | `scripts/setup-routing.sh` | 2h |
+| 2.8 | 端到端测试（含 xray dokodemo-door 本地代理模拟）| 测试报告 | 4h |
 
 ### 关键交付物
 - TCP TProxy 正常运行（SO_ORIGINAL_DST 可正确提取原始目标地址）
 - Decision Interface 提供 Direct / Proxy 两种决策
-- Conntrack Cache 可缓存 Flow 决策（统一 5-tuple）
-- Flow BPF Map 混合 Key 方案（TCP 降维 + UDP 5-tuple）
-- Fast / Slow Path 闭环验证（首次 MISS → 后续 HIT）
-- 跨 TCP 连接的 Flow HIT 验证（同目标不同 src_port 命中缓存）
+- 用户态 Decision Cache（纯目标 key: {dst_ip, dst_port, proto}）
+- 跨连接缓存命中验证（不同 src_port 共享同一目标 entry）
+- 策略路由 + iptables TPROXY 自动化
 
 ---
 
-### Conntrack Cache Scope ⭐
+### Decision Cache Scope ⭐
 
-Conntrack Cache 职责：**仅缓存 Flow 决策**，禁止扩展为 Rule Cache。
+Decision Cache 职责：**缓存 TProxy 层决策结果**，跨连接共享。
 
 ```go
-// ConnKey — 5-tuple 连接标识 (Layer 1: session tracking)
-// Conntrack Cache 始终使用完整 5-tuple，与 protocol 无关。
-type ConnKey struct {
-    SrcIP    uint32
-    SrcPort  uint16
+// CacheKey — 纯目标 key（路由决策仅基于目标地址）
+type CacheKey struct {
     DstIP    uint32
     DstPort  uint16
     Protocol uint8
 }
 
-// FlowEntry — 仅缓存决策结果
-type FlowEntry struct {
+// CacheEntry — 仅缓存决策结果
+type CacheEntry struct {
     Decision Decision  // Direct / Proxy
     LastSeen time.Time
+    HitCount uint64
 }
-
-// Decision — 简化决策结果
-type Decision uint8
-
-const (
-    DecisionDirect Decision = iota
-    DecisionProxy
-)
 ```
 
-**禁止在 Conntrack Cache 中存储**：
+**禁止在 Decision Cache 中存储**：
+- ❌ SrcIP / SrcPort（决策不依赖源地址）
 - ❌ Domain / Hostname
 - ❌ GeoIP / GeoSite 结果
 - ❌ Rule ID / Rule Type
-- ❌ DNS Metadata
-- ❌ 任何路由规则上下文
 
 ---
 
-### Flow BPF Map 混合 Key 设计 ⭐
+### 工作流
 
-根据 `docs/09-conntrack-key-design.md` 的工程决策结论，Flow Cache (Fast Path BPF Map) 使用**混合 Key 方案**：
-
-```
-TCP Flow Key:   {src_ip, dst_ip, dst_port, proto}     → 降维 (去 src_port)
-UDP Flow Key:   {src_ip, src_port, dst_ip, dst_port, proto} → 完整 5-tuple
-```
-
-实现方式：
-
-```c
-// eBPF — 两个独立的 HASH MAP，根据 protocol 选择
-struct tcp_flow_map { ... };   // TCP: 4-tuple key
-struct udp_flow_map { ... };   // UDP: 5-tuple key
-
-int lookup_flow(struct __sk_buff *skb) {
-    if (protocol == IPPROTO_TCP)
-        return lookup_elem(&tcp_flow_map, tcp_key);
-    else
-        return lookup_elem(&udp_flow_map, udp_key);
-}
-```
-
-**Conntrack Cache (session tracking) 始终使用统一 5-tuple，不受此影响。**
-
-详细分析见 `docs/09-conntrack-key-design.md`。
-
----
-
-### Fast Path Workflow ⭐
-
-**第一次访问（Slow Path — 建立 Flow）**：
+**第一次访问（建立缓存）**：
 
 ```
-Client → br0(TC) → FlowMap Miss → fwmark=1
-    → Policy Route → TProxy
-    → SO_ORIGINAL_DST → Decision Interface
-    → Conntrack Cache.Insert(FlowKey, Decision)
-    → BPF Flow Map Writeback
-    → 返回数据给 Client
-    ─── 统计: FlowCacheMiss++
+Client → br0(TC) → CIDR 检查
+    ├── CIDR HIT → 直连（不设 fwmark）
+    └── MISS → fwmark=1 → Policy Route → TProxy
+        → SO_ORIGINAL_DST → Decision Interface
+        → Decision Cache.Insert(CacheKey, Decision)
+        ─── CacheMiss++
 ```
 
-**第二次访问（Fast Path — 命中缓存）**：
+**第二次访问（缓存命中）**：
 
 ```
-Client → br0(TC) → FlowMap Hit
-    → 读取 decision
-    → Direct: 内核转发，不设 fwmark
-    → Proxy: 设 fwmark=1 → TProxy
-    ─── 统计: FlowCacheHit++
+Client → br0(TC) → CIDR 检查
+    ├── CIDR HIT → 直连
+    └── MISS → fwmark=1 → Policy Route → TProxy
+        → Decision Cache.Lookup(CacheKey)
+        ├── HIT → 直接使用缓存决策
+        │   └── CacheHit++
+        └── MISS → Decision Interface → Insert
 ```
-
-**目标**：每 Flow 仅**一次**用户态决策，后续包全部内核态 Fast Path。
 
 ### 验证标准
 
@@ -386,16 +353,13 @@ Level 2（本地 Xray 模拟代理）：
 1. TCP TProxy :1080 启动正常，可接收 fwmark=1 的流量
 2. SO_ORIGINAL_DST 可正确提取原始目标地址
 3. ns-client → br-test(TC) → TProxy → Xray(dokodemo→freedom) → 本地 HTTP 服务
-4. Conntrack Cache Insert/Delete/Lookup 正常
-5. GC 能清理过期 entry
+4. Decision Cache Insert/Lookup 正常
 
-Flow Learning 验证（核心验收项）：
-6. 第一次访问目标 A → 统计 FlowCacheMiss++
-7. Conntrack Insert 确认 → conntrack_cache > 0
-8. BPF Flow Map Writeback 确认 → flow_map_entries > 0
-9. 第二次访问**同一目标 A（新 src_port）**→ TCP 降维命中 → FlowCacheHit++
-10. UDP 不同 src_port → 不命中（5-tuple 隔离）→ FlowCacheMiss++
-11. 验证: TCP FlowCacheMiss 仅增一次, FlowCacheHit ≥ 1
+缓存验证（核心验收项）：
+5. 访问目标 A → CacheMiss++
+6. 再次访问目标 A（不同 src_port）→ CacheHit++（纯目标 key 共享）
+7. 验证: CacheMiss 仅增一次, CacheHit ≥ 1
+8. GC 能清理过期 entry（TTL 超时后自动淘汰）
 ```
 
 ### 本地代理模拟
@@ -516,10 +480,11 @@ Level 2（本地验证）：
 | 5.12 | 规则命中统计 | `pkg/observe/stats.go` | 2h |
 | 5.13 | Debug 模式 + 排查 API | `pkg/observe/debug.go` | 3h |
 | 5.14 | Decision Interface → Rule Engine 集成（替换 Phase 2 的 bare Decision）| `pkg/tproxy/` | 4h |
-| 5.15 | 端到端集成测试（全链路）| 自动化测试套件 | 8h |
-| 5.16 | 树莓派交叉编译与部署测试 | 树莓派验证报告 | 4h |
-| 5.17 | 性能基准测试（wrk/iperf3）| 性能报告 | 4h |
-| 5.18 | 文档完善（README + 配置说明 + 部署指南）| 文档更新 | 4h |
+| 5.15 | ⭐ **eBPF Flow Cache 重新引入** — Rule Engine 产生 non-uniform 决策后，用 eBPF Flow Cache 实现 direct 流量绕过 TProxy | `bpf/tc_ingress.c`, `pkg/bpf/` | 8h |
+| 5.16 | 端到端集成测试（全链路）| 自动化测试套件 | 8h |
+| 5.17 | 树莓派交叉编译与部署测试 | 树莓派验证报告 | 4h |
+| 5.18 | 性能基准测试（wrk/iperf3）| 性能报告 | 4h |
+| 5.19 | 文档完善（README + 配置说明 + 部署指南）| 文档更新 | 4h |
 
 ### 规则优先级
 ```
@@ -535,16 +500,25 @@ Level 2（本地验证）：
 
 ---
 
+### 关键交付物
+- 完整规则引擎（GeoIP + GeoSite + Domain + IP CIDR）
+- Decision Interface → Rule Engine 集成
+- ⭐ **eBPF Flow Cache 重新引入**（direct 流量绕过 TProxy，实现真正 Fast Path）
+- 可观测性（MatchResult Trace + 命中统计 + Debug API）
+- 端到端集成测试通过
+
+---
+
 ## 7.10 里程碑总表
 
 | 里程碑 | 时间 | 级别 | 检查点 |
 |--------|------|------|--------|
 | M0: 构建通过 | Day 2 | — | `make build` 编译成功 |
 | M1: eBPF 数据面 | Day 10 | L1 | TC Hook attach + Flow Map + CIDR 白名单 + 统计 |
-| M2: TProxy + Conntrack | Day 16 | L2 | TCP TProxy + Decision + 混合Key Flow Cache Writeback + Flow Learning 闭环 |
+| M2: TProxy + 用户态缓存 | Day 16 | L2 | TCP TProxy + Decision + 用户态 Cache + 跨连接 HIT |
 | M3: 多协议代理 | Day 22 | L2 | sing-box 本地集成 + 节点故障切换 |
 | M4: DNS 分流 | Day 26 | L2 | 透明劫持 + 分流决策 + 本机隔离 |
-| M5: 生产就绪 | Day 35 | L2→L3 | 全部系统测试通过，树莓派验证通过 |
+| M5: 生产就绪 | Day 38 | L2→L3 | 完整规则引擎 + eBPF Flow Cache Fast Path + 全链路测试 |
 
 ---
 

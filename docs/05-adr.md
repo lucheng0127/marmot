@@ -193,6 +193,10 @@ Marmot 控制逆流回客户端
 
 **结果**：Flow Cache 作为 eBPF 与 Go 之间的桥梁，使后续包完全在内核态处理。
 
+> **2026-06-25 更新**：当前 Phase 2 使用 StaticDecider（恒 proxy），eBPF Flow Cache 无实际收益，已推迟到 Phase 5（Rule Engine 引入 non-uniform 决策后再重新引入）。
+> Phase 2 改为使用用户态 Decision Cache（纯目标 key），Phase 5 Rule Engine 就绪后重新加入 eBPF Flow Cache 实现 direct 流量绕过 TProxy。
+> 该决策不影响 ADR-005 的技术判断，仅调整实施时机。
+
 ---
 
 ## ADR-006: 为什么 GeoSite 优先级高于 GeoIP
