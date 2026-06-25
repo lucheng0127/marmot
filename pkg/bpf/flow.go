@@ -23,7 +23,30 @@ func NewFlowWriter(tcpMap, udpMap *ebpf.Map) *FlowWriter {
 	return &FlowWriter{tcpFlowMap: tcpMap, udpFlowMap: udpMap}
 }
 
-// WriteTCP writes a TCP flow entry (4-tuple) to the eBPF map.
+// WriteDNSFlow writes a DNS-resolved IP decision to the Flow Cache.
+// src_ip is set to 0 — only matches when eBPF key allows wildcard.
+// Currently limited by 4-tuple key requiring src_ip.
+func (w *FlowWriter) WriteDNSFlow(ip net.IP, port uint16, protocol uint8, action uint8) {
+	if protocol == 6 {
+		var k MarmotTcpFlowKey
+		k.DstIp = ipToLE(ip)
+		k.DstPort = htons(port)
+		k.Protocol = 6
+		var v MarmotFlowValue
+		v.Action = action
+		v.ExpireAt = uint32(time.Now().Unix()) + 3600
+		_ = w.tcpFlowMap.Put(&k, &v)
+	} else {
+		var k MarmotUdpFlowKey
+		k.DstIp = ipToLE(ip)
+		k.DstPort = htons(port)
+		k.Protocol = 17
+		var v MarmotFlowValue
+		v.Action = action
+		v.ExpireAt = uint32(time.Now().Unix()) + 300
+		_ = w.udpFlowMap.Put(&k, &v)
+	}
+}
 func (w *FlowWriter) WriteTCP(srcIP, dstIP net.IP, dstPort uint16, action uint8, ttl uint32) error {
 	var k MarmotTcpFlowKey
 	k.SrcIp = ipToLE(srcIP)

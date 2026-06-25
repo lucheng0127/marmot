@@ -10,6 +10,7 @@ import (
 
 // Config is the root configuration structure for marmot.
 type Config struct {
+	ConfigPath string       `yaml:"-"` // path to this config file (set by Load)
 	Log    LogConfig    `yaml:"log"`
 	Proxy  ProxyConfig  `yaml:"proxy"`
 	DNS    DNSConfig    `yaml:"dns"`
@@ -156,6 +157,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := DefaultConfig()
+	cfg.ConfigPath = path
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}

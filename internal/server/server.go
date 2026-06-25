@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -148,8 +149,8 @@ func (s *Server) Run() error {
 		upstreams = dns.DefaultUpstreams()
 	}
 
-	// 11. DNS Engine
-	s.dnsEngine = dns.NewEngine(upstreams, s.dnsCache)
+	// 11. DNS Engine (with Rule Engine + Flow Cache writeback)
+	s.dnsEngine = dns.NewEngine(upstreams, s.dnsCache, s.ruleEngine, s.flowWriter)
 
 	// 12. Upstream Manager
 	s.dnsUpMgr = dns.NewUpstreamManager(upstreams, s.dnsEngine)
@@ -172,9 +173,64 @@ func (s *Server) Run() error {
 	select {
 	case sig := <-sigCh:
 		log.Info("received signal", map[string]interface{}{"signal": sig.String()})
+		if sig == syscall.SIGHUP {
+			return s.reload()
+		}
 	case <-s.ctx.Done():
 	}
 	return s.Shutdown()
+}
+
+// reload handles SIGHUP — reloads config, rules, and restarts subsystems.
+func (s *Server) reload() error {
+	log.Info("SIGHUP received — reloading configuration")
+
+	// Reload config from file
+	cfg, err := config.Load(s.cfg.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("reload config: %w", err)
+	}
+	s.cfg = cfg
+
+	// Reload Geo databases
+	if s.geoReader != nil {
+		_ = s.geoReader.ReloadGeoIP()
+	}
+
+	// Reload rules
+	s.ruleEngine = rule.NewEngine(s.geoReader)
+	if err := s.ruleEngine.LoadRules(configToRuleConfigs(s.cfg.Rules)); err != nil {
+		log.Warn("reload rules", map[string]interface{}{"error": err.Error()})
+	}
+
+	// Update Decision Interface
+	s.decider = tproxy.NewRuleEngineDecider(s.ruleEngine)
+
+	// Update DNS engine
+	upstreams := configToUpstreams(s.cfg.DNS.Upstreams)
+	if len(upstreams) == 0 {
+		upstreams = dns.DefaultUpstreams()
+	}
+	s.dnsEngine = dns.NewEngine(upstreams, s.dnsCache, s.ruleEngine, s.flowWriter)
+	if s.dnsUpMgr != nil {
+		s.dnsUpMgr.Reload(upstreams)
+	}
+
+	// Restart DNS server
+	if s.dnsServer != nil {
+		s.dnsServer.Close()
+	}
+	dnsAddr := s.cfg.DNS.Listen
+	if dnsAddr == "" {
+		dnsAddr = ":53"
+	}
+	s.dnsServer = dns.NewServer(dnsAddr, s.dnsEngine)
+	if err := s.dnsServer.Start(); err != nil {
+		return err
+	}
+
+	log.Info("reload complete")
+	return nil
 }
 
 func (s *Server) Shutdown() error {
