@@ -462,3 +462,5 @@ eBPF TC Hook (数据面)              TProxy + Decision Cache (Slow Path)
 | DNS 子系统故障 | 将 DNS 查询直接透传到上游 DNS | DNS 无分流 |
 | 规则文件加载失败 | 使用最后成功加载的规则集 | 规则不更新 |
 | 内存超限 | 启用连接限制，丢弃新连接 | 部分新连接失败 |
+
+---
