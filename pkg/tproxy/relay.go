@@ -1,7 +1,6 @@
 package tproxy
 
 import (
-	"fmt"
 	"io"
 	"net"
 	"time"
@@ -9,42 +8,56 @@ import (
 	"github.com/lucheng0127/marmot/pkg/log"
 )
 
-// TCPRelay forwards data between the TProxy inbound connection and
-// the proxy outbound (sing-box or Xray dokodemo-door).
-//
-// Phase 3 implementation: simple bidirectional io.Copy.
-// Phase 5 may add connection pooling, multiplexing, or zero-copy.
+// TCPRelay forwards data via SOCKS5 proxy to Xray/sing-box.
 type TCPRelay struct {
-	outboundAddr string // e.g. "127.0.0.1:10800" for Xray
-	timeout      time.Duration
+	socksAddr string
+	timeout   time.Duration
 }
 
-func NewTCPRelay(outboundAddr string, timeout time.Duration) *TCPRelay {
+func NewTCPRelay(socksAddr string, timeout time.Duration) *TCPRelay {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &TCPRelay{
-		outboundAddr: outboundAddr,
-		timeout:      timeout,
-	}
+	return &TCPRelay{socksAddr: socksAddr, timeout: timeout}
 }
 
-// Relay copies data between the inbound client connection and
-// the outbound proxy engine.
+// Relay connects to SOCKS5 proxy and relays bidirectionally.
 func (r *TCPRelay) Relay(inbound net.Conn, origAddr *net.TCPAddr) error {
-	// Dial outbound
-	outbound, err := net.DialTimeout("tcp", r.outboundAddr, r.timeout)
+	outbound, err := net.DialTimeout("tcp", r.socksAddr, r.timeout)
 	if err != nil {
-		return fmt.Errorf("dial outbound %s: %w", r.outboundAddr, err)
+		return err
+	}
+
+	// SOCKS5 handshake: no auth
+	_, err = outbound.Write([]byte{5, 1, 0})
+	if err != nil {
+		return err
+	}
+	reply := make([]byte, 2)
+	if _, err = io.ReadFull(outbound, reply); err != nil {
+		return err
+	}
+
+	// SOCKS5 connect to original destination
+	host := origAddr.IP.To4()
+	port := uint16(origAddr.Port)
+	req := []byte{5, 1, 0, 1, host[0], host[1], host[2], host[3], byte(port >> 8), byte(port)}
+	_, err = outbound.Write(req)
+	if err != nil {
+		return err
+	}
+	resp := make([]byte, 10)
+	if _, err = io.ReadFull(outbound, resp); err != nil {
+		return err
 	}
 
 	log.Debug("relay started", map[string]interface{}{
-		"src":   inbound.RemoteAddr().String(),
-		"dst":   origAddr.String(),
-		"via":   r.outboundAddr,
+		"src": inbound.RemoteAddr().String(),
+		"dst": origAddr.String(),
+		"via": r.socksAddr,
 	})
 
-	// Bidirectional copy
+	// Bidirectional copy with total timeout
 	errCh := make(chan error, 2)
 	go func() {
 		_, err := io.Copy(outbound, inbound)
@@ -55,13 +68,11 @@ func (r *TCPRelay) Relay(inbound net.Conn, origAddr *net.TCPAddr) error {
 		errCh <- err
 	}()
 
-	// Wait for one side to finish
-	err = <-errCh
+	select {
+	case <-errCh:
+	case <-time.After(r.timeout):
+	}
 	_ = outbound.Close()
 	_ = inbound.Close()
-
-	if err != nil && err != io.EOF {
-		return fmt.Errorf("relay error: %w", err)
-	}
 	return nil
 }
