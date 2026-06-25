@@ -612,3 +612,44 @@ ns-client ←→ br-test ←→ Marmot (TC+TProxy)
 - `dokodemo-door` 可以验证 TProxy 原始目标地址提取是否正确
 - `freedom` outbound 可以验证流量是否正确路由到目标
 - 可以手动制造故障场景验证 Health Checker
+
+---
+
+## 7.13 Phase 6：系统完善与自动化（第 39-45 天）
+
+### 级别：Level 3（生产就绪）
+
+### 目标
+完成 Phase 5 遗留的 🟡 优化项，实现基础设施自动化（无需人工执行 iptables/net 配置）。
+
+### 任务清单
+
+| # | 任务 | 状态 | 说明 |
+|---|------|------|------|
+| 6.1 | 策略路由 + iptables TPROXY + DNS REDIRECT 自动化 | 🔴 **本次实现** | `pkg/netif/` 子系统, 启动自动配置, 退出自动清理 |
+| 6.2 | DNS → Flow Cache 写回（解决域名规则不生效问题）| 🟡 | TProxy 在 DNS 解析时写入 Flow Cache, 后续 TCP 直命中 |
+| 6.3 | GeoSite v2fly .dat 格式解析 | 🟡 | `pkg/geo/` 增加 .dat 读取器 |
+| 6.4 | 域名规则 (domain/domain_suffix) 实际工作 | 🟡 | 依赖 6.2 (DNS→FlowCache) |
+| 6.5 | SIGHUP 热重载（Engine/DNS/Rules）| 🟡 | 配置变更自动重载, 不中断现有连接 |
+| 6.6 | HTTP API（MatchResult Trace + Debug）| 🟡 | `pkg/observe/debug.go` 绑定 HTTP |
+| 6.7 | 性能基准测试（wrk/iperf3）| 🟡 | 对比 eBPF Flow Cache ON/OFF |
+| 6.8 | Geo 数据库热更新 | 🟡 | 定时下载 + 热重载 |
+| 6.9 | UDP Flow Cache 写回优化 | 🟡 | 首包即写回, 减少 UDP MISS |
+
+### 关键交付物
+- 网络规则自动化（零人工 iptables 操作）
+- 域名规则正常工作（DNS → Flow Cache 联动）
+- 热重载可用
+- HTTP API 可用
+
+### 验证标准
+
+```
+Level 3（生产环境）：
+1. `marmot start` 后不需要任何手工 iptables 命令
+2. `dig @8.8.8.8` 自动劫持到本地 DNS（无需人工配置 nat 规则）
+3. 域名规则（domain_suffix: .cn → direct）正常工作
+4. SIGHUP 后规则/TProxy/DNS 全部刷新
+5. 进程退出后 iptables 规则全部清理干净
+6. 性能基准: eBPF Flow Cache ON 比 OFF 提升 ≥30%
+```

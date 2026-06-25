@@ -13,6 +13,7 @@ import (
 	"github.com/lucheng0127/marmot/pkg/dns"
 	"github.com/lucheng0127/marmot/pkg/geo"
 	"github.com/lucheng0127/marmot/pkg/log"
+	"github.com/lucheng0127/marmot/pkg/netif"
 	"github.com/lucheng0127/marmot/pkg/proxy"
 	"github.com/lucheng0127/marmot/pkg/rule"
 	"github.com/lucheng0127/marmot/pkg/tproxy"
@@ -30,6 +31,7 @@ type Server struct {
 	cache   *conntrack.Cache
 
 	flowWriter *bpf.FlowWriter
+	netRules   *netif.Rules  // Phase 6: network automation
 
 	proxyEngine *proxy.Engine
 	nodeMgr     *proxy.NodeManager
@@ -54,6 +56,12 @@ func New(cfg *config.Config) *Server {
 
 func (s *Server) Run() error {
 	log.Info("initializing Phase 5 subsystems")
+
+	// 0. Network rules automation (Phase 6.1)
+	s.netRules = netif.New()
+	if err := s.netRules.Setup(); err != nil {
+		return err
+	}
 
 	// 1. eBPF (with Flow Cache maps)
 	s.bpfMgr = bpf.NewManager(s.cfg.BPF.Interface)
@@ -171,6 +179,9 @@ func (s *Server) Run() error {
 
 func (s *Server) Shutdown() error {
 	log.Info("shutting down subsystems")
+	if s.netRules != nil {
+		s.netRules.Cleanup()
+	}
 	if s.dnsServer != nil {
 		s.dnsServer.Close()
 	}
