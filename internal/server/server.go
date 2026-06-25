@@ -156,7 +156,7 @@ func (s *Server) Run() error {
 		return err
 	}
 
-	log.Info("marmot is running (Phase 4: DNS + TProxy + sing-box outbound)")
+	log.Info("marmot is running (Phase 5: Rule Engine + eBPF Flow Cache)")
 	log.Info("waiting for signal")
 
 	sigCh := make(chan os.Signal, 1)
