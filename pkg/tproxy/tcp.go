@@ -24,27 +24,18 @@ type Listener struct {
 	decider   Decider
 	cache     FlowCacheWriter
 	ln        net.Listener
-	relayAddr *string // outbound address for TCP relay (e.g. "127.0.0.1:10800")
+	dial      DialFunc // relay dial function (uses sing-box engine directly)
 }
 
 // NewListener creates a new TProxy TCP listener.
-// addr: listening address like ":1080"
-// decider: Decision Interface
-// cache: Decision Cache
-// relayAddr: optional outbound address for TCP relay (Phase 3)
-func NewListener(addr string, decider Decider, cache FlowCacheWriter, relayAddr ...string) *Listener {
-	var ra *string
-	if len(relayAddr) > 0 && relayAddr[0] != "" {
-		ra = &relayAddr[0]
-	}
+func NewListener(addr string, decider Decider, cache FlowCacheWriter, dial DialFunc) *Listener {
 	return &Listener{
-		addr:      addr,
-		decider:   decider,
-		cache:     cache,
-		relayAddr: ra,
+		addr:    addr,
+		decider: decider,
+		cache:   cache,
+		dial:    dial,
 	}
 }
-
 func (l *Listener) Start() error {
 	config := &net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
@@ -138,9 +129,9 @@ func (l *Listener) handleConn(conn net.Conn) {
 		l.cache.Insert(cacheKey, uint8(decision))
 	}
 
-	// Phase 3: relay to outbound engine
-	if decision == uint8(DecisionProxy) && l.relayAddr != nil {
-		relay := NewTCPRelay(*l.relayAddr, 30*time.Second)
+	// Phase 3: relay to outbound engine (direct dial, no SOCKS5)
+	if decision == uint8(DecisionProxy) && l.dial != nil {
+		relay := NewTCPRelay(l.dial, 30*time.Second)
 		if err := relay.Relay(conn, origAddr); err != nil {
 			log.Error("relay error", map[string]interface{}{
 				"error": err.Error(),

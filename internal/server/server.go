@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -110,18 +111,17 @@ func (s *Server) Run() error {
 		return err
 	}
 
-	// 6. TCP TProxy
-	relayAddr := s.cfg.TProxy.OutboundAddr
-	if relayAddr == "" {
-		relayAddr = "127.0.0.1:10800"
-	}
-	s.tproxy = tproxy.NewListener(s.cfg.TProxy.TCPAddr, s.decider, s.cache, relayAddr)
+	// 6. TCP TProxy (direct dial through sing-box engine, no SOCKS5)
+	s.tproxy = tproxy.NewListener(s.cfg.TProxy.TCPAddr, s.decider, s.cache,
+		func(network, addr string) (net.Conn, error) {
+			return s.proxyEngine.DialTimeout(network, addr, 30*time.Second)
+		})
 	if err := s.tproxy.Start(); err != nil {
 		return err
 	}
 
 	// 7. UDP TProxy
-	s.udpTpr = tproxy.NewUDPListener(s.cfg.TProxy.UDPAddr, s.decider, s.cache, relayAddr)
+	s.udpTpr = tproxy.NewUDPListener(s.cfg.TProxy.UDPAddr, s.decider, s.cache, "127.0.0.1:10800")
 	if err := s.udpTpr.Start(); err != nil {
 		return err
 	}
