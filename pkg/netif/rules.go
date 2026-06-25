@@ -35,6 +35,7 @@ func (r *Rules) Setup() error {
 		{"iptables", "-t", "mangle", "-A", "MARMOT_TPROXY", "-p", "tcp", "-j", "TPROXY", "--on-port", "1080", "--on-ip", "127.0.0.1"},
 		{"iptables", "-t", "mangle", "-A", "MARMOT_TPROXY", "-p", "udp", "-j", "TPROXY", "--on-port", "1080", "--on-ip", "127.0.0.1"},
 		{"iptables", "-t", "nat", "-A", "PREROUTING", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-port", "53"},
+		{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "192.168.100.0/24", "-j", "MASQUERADE"},
 	}
 
 	for _, args := range cmds {
@@ -75,6 +76,13 @@ func (r *Rules) Cleanup() error {
 	// ip rule/route deletion — single command removes all matching
 	_ = run("ip", "rule", "del", "fwmark", "1", "lookup", "100", "priority", "1000")
 	_ = run("ip", "route", "del", "local", "0.0.0.0/0", "dev", "lo", "table", "100")
+
+	// SNAT masquerade
+	for i := 0; i < 10; i++ {
+		if err := run("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", "192.168.100.0/24", "-j", "MASQUERADE"); err != nil {
+			break
+		}
+	}
 
 	r.setup = false
 	log.Info("network rules cleaned up")
