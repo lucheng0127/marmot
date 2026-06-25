@@ -19,6 +19,8 @@ type Manager struct {
 }
 
 type LoadResult struct {
+	TcpFlowMap    *ebpf.Map
+	UdpFlowMap    *ebpf.Map
 	CidrWhitelist *ebpf.Map
 	StatsMap      *ebpf.Map
 	Program       *ebpf.Program
@@ -71,6 +73,8 @@ func (m *Manager) Load() (*LoadResult, error) {
 
 done:
 	return &LoadResult{
+		TcpFlowMap:    m.objs.TcpFlowMap,
+		UdpFlowMap:    m.objs.UdpFlowMap,
 		CidrWhitelist: m.objs.CidrWhitelist,
 		StatsMap:      m.objs.StatsMap,
 		Program:       m.objs.TcIngress,

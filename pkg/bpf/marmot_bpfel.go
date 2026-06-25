@@ -19,6 +19,34 @@ type MarmotCidrKey struct {
 	Prefix    [4]uint8
 }
 
+type MarmotFlowValue struct {
+	_        structs.HostLayout
+	Action   uint8
+	_        [3]byte
+	ExpireAt uint32
+	HitCount uint64
+}
+
+type MarmotTcpFlowKey struct {
+	_        structs.HostLayout
+	SrcIp    uint32
+	DstIp    uint32
+	DstPort  uint16
+	Protocol uint8
+	Pad      uint8
+}
+
+type MarmotUdpFlowKey struct {
+	_        structs.HostLayout
+	SrcIp    uint32
+	SrcPort  uint16
+	DstPort  uint16
+	DstIp    uint32
+	Protocol uint8
+	Pad0     uint8
+	Pad1     uint16
+}
+
 // LoadMarmot returns the embedded CollectionSpec for Marmot.
 func LoadMarmot() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_MarmotBytes)
@@ -70,6 +98,8 @@ type MarmotProgramSpecs struct {
 type MarmotMapSpecs struct {
 	CidrWhitelist *ebpf.MapSpec `ebpf:"cidr_whitelist"`
 	StatsMap      *ebpf.MapSpec `ebpf:"stats_map"`
+	TcpFlowMap    *ebpf.MapSpec `ebpf:"tcp_flow_map"`
+	UdpFlowMap    *ebpf.MapSpec `ebpf:"udp_flow_map"`
 }
 
 // MarmotVariableSpecs contains global variables before they are loaded into the kernel.
@@ -100,12 +130,16 @@ func (o *MarmotObjects) Close() error {
 type MarmotMaps struct {
 	CidrWhitelist *ebpf.Map `ebpf:"cidr_whitelist"`
 	StatsMap      *ebpf.Map `ebpf:"stats_map"`
+	TcpFlowMap    *ebpf.Map `ebpf:"tcp_flow_map"`
+	UdpFlowMap    *ebpf.Map `ebpf:"udp_flow_map"`
 }
 
 func (m *MarmotMaps) Close() error {
 	return _MarmotClose(
 		m.CidrWhitelist,
 		m.StatsMap,
+		m.TcpFlowMap,
+		m.UdpFlowMap,
 	)
 }
 

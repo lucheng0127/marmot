@@ -11,8 +11,10 @@ import (
 	"github.com/lucheng0127/marmot/pkg/bpf"
 	"github.com/lucheng0127/marmot/pkg/conntrack"
 	"github.com/lucheng0127/marmot/pkg/dns"
+	"github.com/lucheng0127/marmot/pkg/geo"
 	"github.com/lucheng0127/marmot/pkg/log"
 	"github.com/lucheng0127/marmot/pkg/proxy"
+	"github.com/lucheng0127/marmot/pkg/rule"
 	"github.com/lucheng0127/marmot/pkg/tproxy"
 )
 
@@ -27,10 +29,16 @@ type Server struct {
 	decider tproxy.Decider
 	cache   *conntrack.Cache
 
+	flowWriter *bpf.FlowWriter
+
 	proxyEngine *proxy.Engine
 	nodeMgr     *proxy.NodeManager
 	healthChk   *proxy.HealthChecker
 	optsConv    *proxy.OptionsConverter
+
+	// Phase 5: Rule Engine
+	ruleEngine *rule.Engine
+	geoReader  *geo.Reader
 
 	// Phase 4: DNS
 	dnsServer *dns.Server
@@ -45,9 +53,9 @@ func New(cfg *config.Config) *Server {
 }
 
 func (s *Server) Run() error {
-	log.Info("initializing Phase 4 subsystems")
+	log.Info("initializing Phase 5 subsystems")
 
-	// 1. eBPF
+	// 1. eBPF (with Flow Cache maps)
 	s.bpfMgr = bpf.NewManager(s.cfg.BPF.Interface)
 	result, err := s.bpfMgr.Load()
 	if err != nil {
@@ -56,16 +64,27 @@ func (s *Server) Run() error {
 	for _, cidr := range s.cfg.BPF.CIDRWhitelist {
 		_ = s.bpfMgr.AddCIDR(cidr)
 	}
-	_ = result
 
-	// 2. Decision Cache
+	// 2. Flow Writer (writeback to eBPF Flow Cache)
+	s.flowWriter = bpf.NewFlowWriter(result.TcpFlowMap, result.UdpFlowMap)
+
+	// 3. Decision Cache
 	s.cache = conntrack.New(1*time.Hour, 65536)
 	s.cache.StartGC(5*time.Minute, make(chan struct{}))
 
-	// 3. Decision Interface
-	s.decider = tproxy.NewStaticDecider()
+	// 4. GeoIP Reader (Phase 5)
+	s.geoReader = geo.NewReader(s.cfg.Rule.GeoIPPath, s.cfg.Rule.GeoSitePath)
 
-	// 4. Node Manager
+	// 5. Rule Engine (Phase 5)
+	s.ruleEngine = rule.NewEngine(s.geoReader)
+	if err := s.ruleEngine.LoadRules(configToRuleConfigs(s.cfg.Rules)); err != nil {
+		log.Warn("rule loading", map[string]interface{}{"error": err.Error()})
+	}
+
+	// 6. Decision Interface — Rule Engine Decider
+	s.decider = tproxy.NewRuleEngineDecider(s.ruleEngine)
+
+	// 7. Node Manager
 	s.nodeMgr = proxy.NewNodeManager()
 	for tag, nodeCfg := range s.cfg.Proxy.Nodes {
 		s.nodeMgr.AddNode(tag, nodeCfg)
@@ -185,6 +204,29 @@ func configToUpstreams(cfg []config.DNSUpstream) []*dns.UpstreamConfig {
 			Tag:     u.Tag,
 			Timeout: timeout,
 		})
+	}
+	return result
+}
+
+func configToRuleConfigs(configs []config.RuleConfig) []rule.RuleConfig {
+	var result []rule.RuleConfig
+	for _, rc := range configs {
+		r := rule.RuleConfig{Tag: rc.Action.Tag, Action: rc.Action.Mode}
+		switch rc.Type {
+		case "domain":
+			r.Domain = []string{rc.Match}
+		case "domain_suffix":
+			r.DomSfx = []string{rc.Match}
+		case "domain_keyword":
+			r.DomKw = []string{rc.Match}
+		case "geoip":
+			r.GeoIP = []string{rc.Match}
+		case "geosite":
+			r.GeoSite = []string{rc.Match}
+		case "ip", "ip_cidr":
+			r.IPCIDR = []string{rc.Match}
+		}
+		result = append(result, r)
 	}
 	return result
 }
