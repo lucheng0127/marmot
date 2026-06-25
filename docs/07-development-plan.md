@@ -468,29 +468,29 @@ Level 2（本地验证）：
 ### 目标
 实现完整规则引擎（含 GeoIP/GeoSite/域名匹配）、可观测性设计、系统整合测试
 
-### 任务清单
+### 任务状态
 
-| # | 任务 | 产出 | 预计工时 |
-|---|------|------|---------|
-| 5.1 | GeoIP 数据加载（MaxMind DB 格式）| `pkg/geo/data.go` | 3h |
-| 5.2 | GeoSite 数据加载 | `pkg/geo/data.go` | 3h |
-| 5.3 | Geo 数据热更新机制 | `pkg/geo/updater.go` | 4h |
-| 5.4 | 规则引擎主接口 + 优先级匹配器 | `pkg/rule/engine.go` | 4h |
-| 5.5 | 域名精确匹配（domain）| `pkg/rule/matcher.go` | 1h |
-| 5.6 | 域名后缀匹配（反转域名 Trie）| `pkg/rule/trie.go` | 4h |
-| 5.7 | 域名关键字匹配（Aho-Corasick）| `pkg/rule/ahocorasick.go` | 4h |
-| 5.8 | GeoIP / GeoSite Matcher | `pkg/rule/geo.go` | 3h |
-| 5.9 | IP CIDR Matcher | `pkg/rule/cidr.go` | 2h |
-| 5.10 | 规则热加载 | `pkg/rule/loader.go` | 3h |
-| 5.11 | MatchResult + 匹配 Trace（可观测性）| `pkg/observe/match_trace.go` | 4h |
-| 5.12 | 规则命中统计 | `pkg/observe/stats.go` | 2h |
-| 5.13 | Debug 模式 + 排查 API | `pkg/observe/debug.go` | 3h |
-| 5.14 | Decision Interface → Rule Engine 集成（替换 Phase 2 的 bare Decision）| `pkg/tproxy/` | 4h |
-| 5.15 | ⭐ **eBPF Flow Cache 重新引入** — Rule Engine 产生 non-uniform 决策后，用 eBPF Flow Cache 实现 direct 流量绕过 TProxy | `bpf/tc_ingress.c`, `pkg/bpf/` | 8h |
-| 5.16 | 端到端集成测试（全链路）| 自动化测试套件 | 8h |
-| 5.17 | 树莓派交叉编译与部署测试 | 树莓派验证报告 | 4h |
-| 5.18 | 性能基准测试（wrk/iperf3）| 性能报告 | 4h |
-| 5.19 | 文档完善（README + 配置说明 + 部署指南）| 文档更新 | 4h |
+| # | 任务 | 状态 | 说明 |
+|---|------|------|------|
+| 5.1 | GeoIP 数据加载（MaxMind DB）| ✅ | `pkg/geo/data.go` — mmdb 格式 |
+| 5.2 | GeoSite 数据加载 | 🟡 | `pkg/geo/data.go` stub — 需下载 db |
+| 5.3 | Geo 数据热更新机制 | 🟡 | 定时 reload 已实现，需完善 |
+| 5.4 | 规则引擎主接口 + 优先级 | ✅ | 8 级优先级 (Domain→Suffix→Kw→GeoSite→CIDR→GeoIP→Default) |
+| 5.5 | 域名精确匹配 | ✅ | `pkg/rule/engine.go` exactMap |
+| 5.6 | 域名后缀匹配（Trie）| ✅ | `pkg/rule/trie.go` |
+| 5.7 | 域名关键字匹配（Aho-Corasick）| ✅ | `pkg/rule/ahocorasick.go` |
+| 5.8 | GeoIP Matcher | ✅ | Level 3 验证: CN→direct,US→proxy |
+| 5.9 | IP CIDR Matcher | ✅ | `pkg/rule/cidr.go` |
+| 5.10 | 规则热加载 | 🟡 | `pkg/rule/loader.go` — SIGHUP stub |
+| 5.11 | MatchResult Trace | ✅ | `pkg/observe/match_trace.go` |
+| 5.12 | 规则命中统计 | ✅ | `pkg/observe/match_trace.go` Stats |
+| 5.13 | Debug API | 🟡 | 骨架，未绑定 HTTP |
+| 5.14 | Decision→RuleEngine 集成 | ✅ | `pkg/tproxy/decision.go` RuleEngineDecider |
+| 5.15 | eBPF Flow Cache 重新引入 | ✅ | TCP 4-tuple / UDP 5-tuple dual map |
+| 5.16 | 端到端集成测试 | ✅ | Pi Level 2+3 验证完成 |
+| 5.17 | 树莓派验证 | ✅ | 完整链路：CIDR→DNS→FlowCache→RuleEngine→TProxy→Relay→Xray→JP01 |
+| 5.18 | 性能基准测试 | 🟡 | 待完成 |
+| 5.19 | 文档完善 | ⬅ 本次提交 | README + 配置说明 |
 
 ### 规则优先级
 ```
@@ -524,7 +524,7 @@ Level 2（本地验证）：
 | M2: TProxy + 用户态缓存 | Day 16 | L2 | TCP TProxy + Decision + 用户态 Cache + 跨连接 HIT |
 | M3: 多协议代理 | Day 22 | L2 | sing-box 本地集成 + 节点故障切换 |
 | M4: DNS 分流 | Day 26 | L2 | 透明劫持 + 分流决策 + 本机隔离 |
-| M5: 生产就绪 | Day 38 | L2→L3 | 完整规则引擎 + eBPF Flow Cache Fast Path + 全链路测试 |
+| M5: 生产就绪 | Day 38 | ✅ L3 GeoIP | 规则引擎 + eBPF Flow Cache + GeoIP 分流 + 全链路测试 |
 
 ---
 
