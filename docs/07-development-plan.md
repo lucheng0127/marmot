@@ -388,13 +388,13 @@ Level 2（本地 Xray 模拟代理）：
 | 3.7 | SS/VMess/VLESS/Trojan 各协议集成（sing-box library 已支持） | 测试报告 | 4h |
 | 3.8 | 多节点配置 + 故障自动切换测试 | 测试报告 | 3h |
 | 3.9 | 热重载配置 + 平滑切换（**stub — 待 Phase 5 细化**）| `pkg/proxy/options.go` | 4h |
-| 3.10 | UDP TProxy（**从 Phase 2 推迟，继续推迟**）| `pkg/tproxy/udp.go` | 4h |
+| 3.10 | UDP TProxy（IP_RECVORIGDSTADDR + session relay + timeout GC）| `pkg/tproxy/udp.go` | 4h |
 
 ### 关键交付物
 - sing-box 作为 library 正常运行 ✅
 - TProxy → TCP relay → Xray/sing-box outbound ✅
 - Node Manager + Health Checker ✅
-- UDP TProxy — **继续推迟**
+- UDP TProxy — **已实现**（IP_RECVORIGDSTADDR + session relay + timeout GC）
 - SS/VMess/VLESS/Trojan 各协议 — **依赖真实节点，待补充测试**
 - 热重载 — **stub 实现，待 Phase 5 完善**
 
