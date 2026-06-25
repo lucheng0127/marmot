@@ -147,8 +147,86 @@ UDP: Key = {src_ip, src_port, dst_ip, dst_port, proto}  ← 完整 5-tuple
 | src_port 随机性 | 每次连接随机分配 | 每次请求随机分配 |
 | 同目标决策一致性 | ✅ 完全一致（client→target 始终相同） | ❌ 可能不同（对称 NAT 重新映射） |
 | 多路复用风险 | 🟢 低（单 TCP 连接内有序） | 🔴 高（QUIC 应用层多路复用） |
-| 降维安全性 | 🟢 安全 | 🔴 有风险 |
-| 降维必要性 | 🟢 收益高（短连接场景 HIT rate 提升显著） | 🟡 收益低（UDP 流量占比小） |
+| **降维安全性** | 🟢 安全 | 🔴 有风险 |
+| **降维必要性** | 🟢 收益高（短连接场景 HIT rate 提升显著） | 🟡 收益低（UDP 流量占比小） |
+
+---
+
+## 3B. 纯目标 Key — {dst_ip, dst_port, proto} ⭐
+
+### 3B.1 定义
+
+进一步去除 `src_ip`，Fast Path Cache Key 仅保留路由决策所需的字段：
+
+```
+TCP: Key = {dst_ip, dst_port, proto}
+UDP: Key = {dst_ip, dst_port, proto}
+```
+
+与 §3A 的区别：
+
+| 方案 | TCP Key | UDP Key |
+|------|---------|---------|
+| C: 混合 (src_ip 降维) | {src_ip, dst_ip, dst_port} | 5-tuple |
+| **D: 纯目标** | **{dst_ip, dst_port}** | **{dst_ip, dst_port}** |
+
+### 3B.2 为什么可以去掉 src_ip？
+
+**核心前提：Marmot 的路由决策完全基于目标地址**。
+
+| 决策维度 | 依据 | src_ip 是否影响？ |
+|---------|------|-----------------|
+| GeoIP | dst_ip | ❌ 无关 |
+| GeoSite | 域名 → 解析为 dst_ip | ❌ 无关 |
+| CIDR 白名单 | dst_ip（在 Flow Cache 之前检查） | ❌ 无关 |
+| 自定义 IP 规则 | dst_ip | ❌ 无关 |
+| 默认策略 | 兜底 | ❌ 无关 |
+
+**所有路由决策的输入都是 dst_ip + dst_port。src_ip 不参与决策。** 因此无需在 cache key 中包含 src_ip。
+
+### 3B.3 谁保证连接正确性？
+
+连接正确性由两个独立层保证：
+
+```
+Layer 1: Conntrack (session tracking)
+  5-tuple 精确追踪每个独立连接
+  负责超时、GC、TCP 状态跟踪
+  → 保证连接不混淆
+
+Layer 2: Fast Path Cache (decision cache)
+  仅缓存"这个目标应该走 proxy / direct"
+  不关心哪个客户端、哪个源端口
+  → 只回答"怎么走"，不回答"是谁的"
+```
+
+### 3B.4 安全性论证
+
+```
+假设: 客户端 A 和 B 同时访问同一个目标 1.2.3.4:443
+
+场景 1: 策略相同
+  A → proxy, B → proxy  → 共享 entry {1.2.3.4, 443, tcp}=proxy  ✅ 正确
+
+场景 2: 策略不同（理论上）
+  A → proxy, B → direct  → 共享 entry 会出错
+  → 但在 Marmot 架构中不存在 —— 策略基于 dst_ip，不可能出现
+    同一 dst_ip 对不同 client 产生不同决策
+```
+
+**结论：在路由决策基于目标的架构下，去掉 src_ip 是安全的。**
+
+### 3B.5 收益
+
+```
+HIT rate 估算:
+  10 个 client, 每个 100 个短连接到同一目标
+  5-tuple:   1000 次连接 × 首次 MISS = 1000 次 Slow Path
+  混合(C):   1000 次连接 × 10 client × 首次 MISS = 10 次 Slow Path
+  纯目标(D): 1 次 MISS (无论多少 client) = 1 次 Slow Path ✓
+```
+
+BPF Map 占用：从 65536 entries 降至 `max(不同目标数, 少数)`。
 
 ### 3A.3 eBPF 实现方式
 
@@ -463,7 +541,18 @@ UDP: 5-tuple   {src_ip, src_port, dst_ip, dst_port, proto}
 | UDP QUIC/HTTP3 | 🟢 高 | 5-tuple 防止 QUIC 多路复用污染 |
 | UDP 对称 NAT | 🟢 高 | 5-tuple 保持 NAT 映射准确性 |
 
-### 9.4 分界线总结
+### 9.4 适用方案 D：纯目标 Key ⭐
+
+这是 Marmot **最终推荐方案**：
+
+```
+TCP/UDP: Key = {dst_ip, dst_port, proto}
+Conntrack: 统一 5-tuple
+```
+
+**理由**：路由决策完全基于目标地址，src_ip 和 src_port 不参与决策。连接正确性由 conntrack (5-tuple) 保证，Fast Path Cache 仅缓存决策结果。
+
+### 9.5 分界线总结
 
 ```
 src_port 是否影响决策?
@@ -480,29 +569,33 @@ Marmot 透明代理场景：**src_port 不影响决策** → 降维可行。
 
 ## 10. 决策建议
 
-### 10.1 推荐方案 C：TCP 降维 + UDP 5-tuple (混合方案) ⭐
+### 10.1 推荐方案 D：纯目标 Key ⭐
 
-**明确推荐：Marmot Fast Path Cache 使用混合 Key 方案。**
+**明确推荐：Marmot Fast Path Cache 使用纯目标 Key。**
 
 ```
-TCP: Key = {src_ip, dst_ip, dst_port, proto}         → 降维
-UDP: Key = {src_ip, src_port, dst_ip, dst_port, proto} → 5-tuple
+TCP: Key = {dst_ip, dst_port, proto}
+UDP: Key = {dst_ip, dst_port, proto}
+Conntrack (session tracking): 统一 5-tuple（不变）
 ```
 
 ### 10.2 理由
 
-1. **TCP 收益最大化**：降维后短连接场景 HIT rate 从 ~30% 提升到 ~70%
-2. **UDP 风险彻底避免**：对称 NAT、QUIC 多路复用、应用层混淆全部保持 5-tuple 隔离
-3. **工程代价可控**：仅需两个 BPF Map + 一个 proto 条件分支
-4. **Conntrack 无需修改**：session tracking 层始终使用 5-tuple
-5. **与 Marmot 流量特征匹配**：TCP 占流量 >90%，是优化的主要目标
+1. **路由决策完全基于目标**：GeoIP/GeoSite/CIDR/自定义规则全部以 dst_ip 为输入，src_ip 和 src_port 不参与决策
+2. **HIT rate 最大化**：无论多少客户端、多少连接访问同一目标，仅首次 Slow Path
+3. **连接正确性由 conntrack 保证**：5-tuple session tracking 独立于 Fast Path Cache
+4. **sing-box 维护代理连接状态**：代理协议层的连接完全独立，不受 cache key 影响
+5. **CIDR 白名单在 Flow Cache 之前**：不会被缓存污染或绕过
+6. **工程极简**：单个 HASH MAP，无需 protocol 分支
 
-### 10.3 备选方案（不推荐）
+### 10.3 备选方案
 
-| 方案 | 适用场景 | 不推荐理由 |
-|------|---------|-----------|
-| A: 统一 5-tuple | 状态防火墙 | Marmot 透明代理不需要 src_port 精度 |
-| B: 统一降维 | 纯 TCP 代理 | UDP 对称 NAT 场景不安全 |
+| 方案 | TCP Key | UDP Key | 适用场景 | 推荐度 |
+|------|---------|---------|---------|--------|
+| A: 统一 5-tuple | 5-tuple | 5-tuple | 状态防火墙 | ❌ |
+| B: 统一降维 | 去 src_port | 去 src_port | 纯 TCP 代理 | ❌ |
+| C: 混合 | 去 src_port | 5-tuple | 需 UDP 精度 | 🟡 备选 |
+| **D: 纯目标** | **{dst, dst_port}** | **{dst, dst_port}** | **Marmot 透明代理** | **⭐ 推荐** |
 
 ### 10.4 特殊情况处理
 
@@ -583,36 +676,18 @@ type ConnKey struct {
     Protocol uint8
 }
 
-// Layer 2: Fast Path Cache — 按协议区分 key schema
-
-// TCP Flow Cache Key — 降维 (去 src_port)
-type TCPFlowKey struct {
-    SrcIP    uint32
+// Layer 2: Fast Path Cache (decision cache) — 纯目标 key
+// 路由决策仅基于目标地址，无需 src_ip / src_port
+type FlowKey struct {
     DstIP    uint32
     DstPort  uint16
-    Protocol uint8  // always 6
+    Protocol uint8
 }
 
-// UDP Flow Cache Key — 完整 5-tuple
-type UDPFlowKey struct {
-    SrcIP    uint32
-    SrcPort  uint16
-    DstIP    uint32
-    DstPort  uint16
-    Protocol uint8  // always 17
-}
-
-// 通用写入接口 — 根据 protocol 选择对应 map
-func WriteFlowCache(proto uint8, srcIP, dstIP uint32, srcPort, dstPort uint16, action uint8) error {
-    switch proto {
-    case 6: // TCP
-        key := TCPFlowKey{SrcIP: srcIP, DstIP: dstIP, DstPort: dstPort, Protocol: 6}
-        return tcpFlowMap.Put(&key, &FlowValue{Action: action})
-    case 17: // UDP
-        key := UDPFlowKey{SrcIP: srcIP, SrcPort: srcPort, DstIP: dstIP, DstPort: dstPort, Protocol: 17}
-        return udpFlowMap.Put(&key, &FlowValue{Action: action})
-    }
-    return nil
+// 写入接口
+func WriteFlowCache(dstIP uint32, dstPort uint16, proto uint8, action uint8) error {
+    key := FlowKey{DstIP: dstIP, DstPort: dstPort, Protocol: proto}
+    return flowMap.Put(&key, &FlowValue{Action: action})
 }
 ```
 
@@ -629,19 +704,19 @@ Phase 5:          Conntrack Cache = 5-tuple + Rule Engine
 
 ## 附录 A：对比总表
 
-| 对比维度 | A: 统一 5-tuple | B: 统一降维 | **C: TCP降维+UDP 5-tuple ⭐** |
-|---------|------------|----------------------|--------------------------|
-| **精度** | 🟢 最高 | 🟡 中 | 🟢 高 (TCP降维/UDP 5-tuple) |
-| **跨连接 HIT** | ❌ 永不 | ✅ 同目标共享 | ✅ **TCP共享,UDP精确** |
-| **短连接 HIT rate** | ~30% | ~70% | **~70% (TCP为主)** |
-| **长连接 HIT rate** | >99% | >99% | >99% |
-| **BPF Map 占用** | 🟡 每连接1 entry | 🟢 每目标1 entry | 🟢 TCP压缩, UDP精确 |
-| **NAT 安全性** | 🟢 完全隔离 | 🟡 同源共享 | 🟢 TCP共享安全/UDP隔离 |
-| **UDP 安全性** | 🟢 完全隔离 | 🔴 对称NAT风险 | 🟢 **保持5-tuple隔离** |
-| **多租户安全性** | 🟢 完全隔离 | 🟢 src_ip在key中 | 🟢 同上 |
-| **conntrack 一致性** | 🟢 一致 | 🟡 需分离 | 🟡 需分离(conntrack仍5-tuple) |
-| **工程复杂度** | 🟢 低 | 🟡 中 | 🟡 **中 (两个BPF map)** |
-| **推荐场景** | 状态防火墙/NAT网关 | 纯TCP代理 | **Marmot 透明代理** |
+| 对比维度 | A: 统一 5-tuple | B: 统一降维(src_ip) | C: TCP降维+UDP5-tuple | **D: 纯目标(dst)** |
+|---------|------------|----------------------|--------------------------|-------------------|
+| **精度** | 🟢 最高 | 🟡 中 | 🟢 高 | 🟡 中 (仅目标维度) |
+| **跨连接 HIT** | ❌ 永不 | ✅ 同 client 共享 | ✅ TCP共享/UDP精确 | ✅ **所有 client 共享** |
+| **短连接 HIT rate** | ~30% | ~70% | ~70% | **~99%** |
+| **长连接 HIT rate** | >99% | >99% | >99% | >99% |
+| **BPF Map 占用** | 🟡 每连接1 entry | 🟢 每client目标1 | 🟢 TCP压缩/UDP精确 | 🟢 **每目标1 entry** |
+| **NAT 安全性** | 🟢 完全隔离 | 🟡 同源共享 | 🟢 TCP共享/UDP隔离 | 🟡 全目标共享(决策一致) |
+| **UDP 安全性** | 🟢 完全隔离 | 🔴 对称NAT风险 | 🟢 5-tuple隔离 | 🟢 **conntrack保证正确性** |
+| **多租户安全性** | 🟢 完全隔离 | 🟢 src_ip在key中 | 🟢 同上 | 🟡 同目标共享(策略一致) |
+| **conntrack 一致性** | 🟢 一致 | 🟡 需分离 | 🟡 需分离 | 🟡 需分离(conntrack仍5-tuple) |
+| **工程复杂度** | 🟢 低 | 🟡 中 (双map) | 🟡 中 (双map+分支) | 🟢 **最低(单map,无分支)** |
+| **推荐场景** | 状态防火墙/NAT网关 | 纯TCP代理 | 需UDP精度代理 | **Marmot 透明代理 ⭐** |
 
 ---
 
@@ -667,14 +742,15 @@ Phase 5:          Conntrack Cache = 5-tuple + Rule Engine
     └──────────────────┘          └──────────────────────┘
                                              │
                                              ▼
-                                             ┌──────────────────────────┐
-                                             │ Marmot 推荐方案 C         │
-                                             │                          │
-                                             │ Conntrack: 统一 5-tuple   │
-                                             │ TCP Flow: 降维 key        │
-                                             │ UDP Flow: 5-tuple         │
-                                             │                          │
-                                             │ TCP HIT rate: ~70% ✅    │
-                                             │ UDP 安全性: 完整保证 ✅  │
-                                             └──────────────────────────┘
+                                     ┌──────────────────────────┐
+                                     │ Marmot 推荐方案 D          │
+                                     │                          │
+                                     │ Conntrack: 统一 5-tuple   │
+                                     │ Fast Path Cache: 纯目标   │
+                                     │   Key = {dst, port, proto}│
+                                     │                          │
+                                     │ HIT rate: ~99% ✅        │
+                                     │ 工程复杂度: 最低 ✅       │
+                                     │ 连接正确性: conntrack保证✅│
+                                     └──────────────────────────┘
 ```
