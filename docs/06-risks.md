@@ -99,16 +99,16 @@
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-## 6.8 ⭐ v0.3 新增：Conntrack BPF Map 一致性与溢出风险
+## 6.8 ⭐ v0.3 新增：Decision Cache 重启丢失风险（Phase 2 更新）
 
 | 维度 | 详情 |
 |------|------|
 | **风险等级** | 🟡 中 |
-| **描述** | Conntrack Cache（Go map）与 BPF Flow Map（kernel）之间可能存在数据不一致；BPF Map 65536 上限在高并发场景可能被占满 |
-| **影响范围** | Flow 分类错误（不一致）、后续包退化为 TProxy（map 满）|
-| **概率** | 中 |
-| **缓解措施** | ① 以用户态 Conntrack Cache 为权威源，BPF Map 仅为缓存 ② 定时 GC 清理过期条目 ③ LRU 淘汰策略 ④ BPF Map 满时优雅退化：直接清空 map，新连接全部走 Slow Path ⑤ 规则更新时进入 drain 模式，不强制清空 inflight 连接 |
-| **监控指标** | Flow Map 占用率、GC 每次清理条目数、规则 drain 时长 |
+| **描述** | Phase 2 用户态 Decision Cache 在进程重启后丢失；多 goroutine 并发写入可能导致短暂不一致 |
+| **影响范围** | 重启后缓存 warmup 期全部走 Complete Decision Path |
+| **概率** | 低 |
+| **缓解措施** | ① 重启后缓存自动 warmup（首次访问重新决策，结果一致）② LRU 淘汰防溢出 ③ Phase 5 引入 eBPF Flow Map（BPF FS pin 持久化）后可缓解 |
+| **监控指标** | Cache Hit Rate、Cache 条目数、GC 每次清理数 |
 
 ## 6.9 风险预防总结（v0.3 更新）
 

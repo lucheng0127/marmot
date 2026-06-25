@@ -58,7 +58,7 @@ marmot/
 │  │  ├── options.go            # sing-box 配置转换器
 │  │  └── health.go             # ⭐ 健康检查（原 internal/health）
 │  │
-│  ├─ pkg/conntrack/    # ⭐ v0.3 新增：Conntrack Fast Cache
+│  ├─ pkg/conntrack/    # Phase 2: 用户态 Decision Cache（纯目标 key）
 │  │  ├── cache.go              # Conntrack Cache 主结构
 │  │  ├── flow.go               # FlowKey / FlowEntry 定义
 │  │  └── sync.go               # BPF Map 同步逻辑
@@ -137,7 +137,7 @@ cmd/marmot
     │      │
     │      ├─ pkg/rule        (规则引擎)
     │      │
-    │      ├─ pkg/conntrack  (Flow Cache + BPF Map 同步)  ⭐
+    │      ├─ pkg/conntrack  (Decision Cache — 用户态, 纯目标 key)
     │      │
     │      └─ pkg/observe    (可观测性：MatchResult + 统计)  ⭐
     │
@@ -145,8 +145,9 @@ cmd/marmot
 
   内部依赖关系（关键调用路径）：
     server → rule.Engine.Match(addr)       # 规则引擎查询
-    server → conntrack.Cache.Insert()      # 写入 Flow Cache
-    conntrack → bpf.flowMap.Put()          # 同步到 BPF Map
+    server → conntrack.Cache.Insert()      # 写入 Decision Cache
+    conntrack → cache.Lookup()             # 缓存查询（Phase 2 用户态）
+    # Phase 5: conntrack → bpf.flowMap.Put()  # 同步到 BPF Flow Map
     proxy → rule.Engine.Match(addr)        # 代理引擎查询规则
     dns → rule.Engine.Match(addr)          # DNS 引擎查询规则
     bpf → conntrack (perf event)           # (可选) BPF 通知连接关闭
@@ -162,10 +163,10 @@ Step 2 : Log Init                (初始化日志)
 Step 3 : Rule Engine Init        (加载规则数据 GeoIP/GeoSite)
 Step 4 : DNS Subsystem Init      (启动 DNS 服务器)
 Step 5 : Proxy Engine Init       (初始化 sing-box + Node Manager)
-Step 6 : Conntrack Cache Init    (⭐ 建立 Flow Cache + 连接 BPF Map)
+Step 6 : Decision Cache Init     (⭐ 建立用户态缓存)
 Step 7 : TProxy Listen           (启动 TProxy 监听)
 Step 8 : eBPF Load + Attach      (加载 eBPF 并挂载 TC, 提供 Flow Map FD)
-Step 9 : Conntrack Bind BPF      (⭐ 将 Conntrack 连接到 BPF Flow Map)
+Step 9 : Decision Cache Init     (⭐ 建立用户态缓存, 纯目标 key)
 Step 10: Policy Route Setup      (配置策略路由)
 Step 11: API Server Start        (启动 HTTP API)
 Step 12: Health Check Start      (启动周期性健康检查)
@@ -185,7 +186,7 @@ Step 12 → Step 11 → ... → Step 1
 | HTTP API | github.com/gin-gonic/gin 或 net/http | 轻量 API 需求，后续决定 |
 | 日志 | github.com/sirupsen/logrus | 结构化日志 |
 | GeoIP 解析 | github.com/oschwald/maxminddb-golang | MaxMind DB 格式解析 |
-| Conntrack Cache | 自实现（Go map + cilium/ebpf map） | 用户态 ↔ 内核态双向同步 |
+| Conntrack Cache | 自实现（Go map） | 用户态 Decision Cache，纯目标 key {dst_ip, dst_port, proto} |
 | 可观测性 | 自实现（MatchResult + 计数器） | 匹配链路追踪 + 命中统计 |
 | 规则匹配（域名精确/后缀）| 自实现 反转域名 Trie | O(n) 匹配，内存紧凑 |
 | 规则匹配（域名关键字）| 自实现 Aho-Corasick 自动机 | O(n) 多模式匹配，单次扫描 |

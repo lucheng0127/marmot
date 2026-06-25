@@ -2,6 +2,11 @@
 
 > ⚠️ 本文档替代原 `03-traffic-flow.md`（流量处理链路），扩展为完整数据面设计文档。
 
+> **Phase 2 设计变更说明**  
+> 当前 Phase 2 使用 StaticDecider（恒 proxy），eBPF Flow Cache (Fast Path) 已移除。  
+> eBPF 仅做 CIDR 白名单 + fwmark=1 策略路由。决策缓存在 TProxy 用户态（纯目标 key）。  
+> 本文档的 Flow Cache / Fast Path 相关设计将在 **Phase 5**（Rule Engine 引入 multi-decision 后）重新引入。
+
 ---
 
 ## 3.1 数据面全景
