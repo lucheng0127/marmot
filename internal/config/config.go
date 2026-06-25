@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/sagernet/sing-box/option"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,6 +29,7 @@ type LogConfig struct {
 // ProxyConfig defines upstream proxy node groups.
 type ProxyConfig struct {
 	Groups []ProxyGroup `yaml:"groups"`
+	Nodes  map[string]option.Outbound `yaml:"nodes"` // tag -> outbound option
 }
 
 // ProxyGroup is a named group of proxy nodes sharing the same outbound tag.

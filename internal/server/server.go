@@ -11,6 +11,7 @@ import (
 	"github.com/lucheng0127/marmot/pkg/bpf"
 	"github.com/lucheng0127/marmot/pkg/conntrack"
 	"github.com/lucheng0127/marmot/pkg/log"
+	"github.com/lucheng0127/marmot/pkg/proxy"
 	"github.com/lucheng0127/marmot/pkg/tproxy"
 )
 
@@ -24,6 +25,12 @@ type Server struct {
 	tproxy  *tproxy.Listener
 	decider tproxy.Decider
 	cache   *conntrack.Cache
+
+	// Phase 3 subsystems
+	proxyEngine *proxy.Engine
+	nodeMgr     *proxy.NodeManager
+	healthChk   *proxy.HealthChecker
+	optsConv    *proxy.OptionsConverter
 }
 
 func New(cfg *config.Config) *Server {
@@ -36,61 +43,59 @@ func New(cfg *config.Config) *Server {
 }
 
 func (s *Server) Run() error {
-	log.Info("initializing subsystems")
+	log.Info("initializing Phase 3 subsystems")
 
-	// 1. Load eBPF (CIDR + stats only — no Flow Cache in Phase 2)
-	log.Info("loading eBPF", map[string]interface{}{
-		"interface": s.cfg.BPF.Interface,
-	})
+	// ── 1. eBPF ──
 	s.bpfMgr = bpf.NewManager(s.cfg.BPF.Interface)
 	result, err := s.bpfMgr.Load()
 	if err != nil {
 		return err
 	}
-	log.Info("eBPF loaded (CIDR + fwmark only)")
-
-	// 2. Add CIDR whitelist entries
 	for _, cidr := range s.cfg.BPF.CIDRWhitelist {
-		if err := s.bpfMgr.AddCIDR(cidr); err != nil {
-			log.Warn("add CIDR failed", map[string]interface{}{
-				"cidr":  cidr,
-				"error": err.Error(),
-			})
-		} else {
-			log.Info("CIDR added", map[string]interface{}{
-				"cidr": cidr,
-			})
-		}
+		_ = s.bpfMgr.AddCIDR(cidr)
 	}
-	_ = result // StatsMap and CidrWhitelist available via mgr
+	_ = result
 
-	// 3. Create Decision Cache (纯目标 key)
+	// ── 2. Decision Cache ──
 	s.cache = conntrack.New(1*time.Hour, 65536)
-	log.Info("Decision Cache created (pure target key)")
-
-	// 4. Start GC
 	gcStop := make(chan struct{})
 	s.cache.StartGC(5*time.Minute, gcStop)
-	log.Info("Cache GC started (interval=5m)")
+	_ = gcStop
 
-	// 5. Decision Interface
+	// ── 3. Decision Interface ──
 	s.decider = tproxy.NewStaticDecider()
-	log.Info("Decision Interface: StaticDecider")
 
-	// 6. Start TProxy Listener
-	s.tproxy = tproxy.NewListener(
-		s.cfg.TProxy.TCPAddr,
-		s.decider,
-		s.cache,
-	)
+	// ── 4. TProxy ──
+	s.tproxy = tproxy.NewListener(s.cfg.TProxy.TCPAddr, s.decider, s.cache)
 	if err := s.tproxy.Start(); err != nil {
 		return err
 	}
-	log.Info("TProxy listening", map[string]interface{}{
-		"addr": s.cfg.TProxy.TCPAddr,
+
+	// ── 5. Node Manager ──
+	s.nodeMgr = proxy.NewNodeManager()
+	for tag, nodeCfg := range s.cfg.Proxy.Nodes {
+		s.nodeMgr.AddNode(tag, nodeCfg)
+	}
+
+	// ── 6. Options Converter + Engine ──
+	s.optsConv = proxy.NewOptionsConverter()
+	options := s.optsConv.ToOptions(s.nodeMgr)
+	s.proxyEngine, err = proxy.New(s.ctx, options)
+	if err != nil {
+		return err
+	}
+	if err := s.proxyEngine.Start(); err != nil {
+		return err
+	}
+	log.Info("sing-box engine started", map[string]interface{}{
+		"nodes": s.nodeMgr.Count(),
 	})
 
-	log.Info("marmot is running (Phase 2: TProxy + Decision Cache)")
+	// ── 7. Health Checker ──
+	s.healthChk = proxy.NewHealthChecker(s.nodeMgr, 30*time.Second, 5*time.Second)
+	s.healthChk.Start(s.ctx)
+
+	log.Info("marmot is running (Phase 3: TProxy + sing-box outbound)")
 	log.Info("waiting for signal")
 
 	sigCh := make(chan os.Signal, 1)
@@ -98,15 +103,12 @@ func (s *Server) Run() error {
 
 	select {
 	case sig := <-sigCh:
-		log.Info("received signal", map[string]interface{}{
-			"signal": sig.String(),
-		})
+		log.Info("received signal", map[string]interface{}{"signal": sig.String()})
 		if sig == syscall.SIGHUP {
 			log.Info("SIGHUP — config reload not yet implemented")
 			return s.Shutdown()
 		}
 	case <-s.ctx.Done():
-		log.Info("server context cancelled")
 	}
 
 	return s.Shutdown()
@@ -117,6 +119,9 @@ func (s *Server) Shutdown() error {
 
 	if s.tproxy != nil {
 		s.tproxy.Close()
+	}
+	if s.proxyEngine != nil {
+		s.proxyEngine.Close()
 	}
 	if s.bpfMgr != nil {
 		s.bpfMgr.Unload()
