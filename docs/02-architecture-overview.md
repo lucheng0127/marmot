@@ -153,46 +153,39 @@
 |------|--------------|--------------|------|
 | 国内直连流量 (direct) | 每次经 TProxy | 内核直接转发 | **零 TProxy 开销** |
 | 代理流量 (proxy) | 每次经 TProxy | 内核直接标记 | **持平** |
-```
 
 #### 为什么需要用户态 Decision Cache
 
 | 考量 | 无 Cache | 有 Cache |
 |------|---------|---------|
-| 每个新建连接 | 必走 TProxy + 用户态规则匹配 | 第一次走，后续内核态直接处理 |
-| 国内流量（高占比场景） | 每个国内连接都有 TProxy 开销 | 首个包后即在内核完成，零 TProxy 开销 |
-| CPU 使用 | 随连接数线性增长 | 仅首包开销，后续 O(1) BPF map lookup |
-| 吞吐 | 被 TProxy 用户态处理能力限制 | 内核态直接转发 |
-| 热加载规则 | ⚠️ 需要遍历所有连接迁移 | 旧连接用旧 cache，新连接用新规则 |
+| 每个新建连接 | 必走 TProxy + 用户态决策 | 必走 TProxy，但跳过 Decision Interface |
+| 跨连接同目标 | 每次独立决策 | 仅首次决策，后续 Cache HIT |
+| CPU 使用 | 随连接数线性增长 | 仅首次决策开销 |
+| 缓存重启 | 缓存丢失，需 warmup | warmup 期间退化为无缓存状态 |
 
-**典型收益**（估算）：对于 80% 国内流量 + 20% 代理流量的场景，Fast Path 可减少 **~75%** 的 TProxy 用户态处理开销。
+> **Phase 5 预期**：eBPF Flow Cache 重新引入后，可实现 direct 流量在
+> 内核态直接转发、zero TProxy 开销。当前 Phase 2 仅做到用户态缓存。
 
-#### Fast Path / Slow Path 完整性
+#### 数据面流程整合示意
 
 ```
-                 Fast Path (内核态)                 Slow Path (用户态)
-                 ───────────────────               ──────────────────
-                 eBPF TC Hook                      TProxy :1080
-                   │                                     │
-                   │                                     ▼
-              Flow BPF Map                        Rule Engine
-              (5-tuple → Action)                  Match(addr)
-                   │                                     │
-                   │                              MatchResult
-                   │                              {Action, RuleID, ...}
-                   │                                     │
-                   │                              Conntrack Cache
-                   │                              (用户态管理)
-                   │                                     │
-                   │                              BPF Map Update
-                   │                              (sync → Flow BPF Map)
-                   │                                     │
-                   ▼                                     │
-          根据 Action 决策                                │
-          direct → 内核转发                                │
-          proxy  → TProxy(仅首次)                         │
-          block  → 丢弃                                    │
-                                                   后续包命中 Fast Path
+                    ┌─────────────────────┐
+                    │  LAN Client → br0   │
+                    └────────┬────────────┘
+                             │
+                    ┌────────▼────────────┐
+                    │  TC ingress (eBPF)   │
+                    │  CIDR → direct bypass│
+                    │  其余 → fwmark=1     │
+                    └────────┬────────────┘
+                             │
+                    ┌────────▼────────────┐
+                    │  TProxy :1080       │
+                    │  SO_ORIGINAL_DST    │
+                    │  Decision Cache     │
+                    │  ┌─ HIT ─→ 用缓存   │
+                    │  └─ MISS → Decision │
+                    └────────────────────┘
 ```
 
 ---
@@ -443,105 +436,28 @@ type CacheEntry struct {
 > eBPF Flow Cache 在 Phase 5 重新引入。此处为预留设计，当前 Phase 2 不实现。
 > 届时将用户态 Decision Cache → BPF Flow Map → 内核态 Fast Path。
 
-```go
-// 用户态 Decision Cache（Phase 2 实现）
-type CacheEntry struct {
-    Decision Decision    // Direct / Proxy
-    LastSeen time.Time
-    HitCount uint64
-}
-
-// CacheKey — 纯目标 key
-type CacheKey struct {
-    DstIP    uint32
-    DstPort  uint16
-    Protocol uint8
-}
-
-// Decision Cache 主结构
-type DecisionCache struct {
-    entries map[CacheKey]*CacheEntry
-    mu      sync.RWMutex
-    stats   CacheStats
-}
-
-func (c *ConntrackCache) Lookup(key FlowKey) *FlowEntry
-func (c *ConntrackCache) Insert(key FlowKey, entry *FlowEntry) error
-func (c *ConntrackCache) Delete(key FlowKey)
-func (c *ConntrackCache) EvictOldest()  // LRU 淘汰
-```
-
-### 2.3.6 eBPF ↔ Go 通信机制
-
-```
-Go (用户态)                              eBPF (内核态)
-─────────────                            ──────────────
-Conntrack Cache                          Flow BPF Map (HASH)
-     │                                         │
-     │  Rule Engine 决策完成                     │
-     │                                         │
-     ├── bpf_map_update_elem() ──────────────► │  写入 flow
-     │                                         │
-     │                                         ├── TC ingress lookup()
-     │                                         │  命中 → Fast Path
-     │                                         │  未命中 → TProxy
-     │                                         │
-     ├── bpf_map_delete_elem() ◄────────────── │  FIN/RST 监测
-     │  或 TTL 过期                              │  (可选: perf event)
-     │                                         │
-     ├── bpf_map_lookup_elem() ──────────────► │  查询当前 map 状态
-     │                                         │
-     └── bpf_map_get_next_key() ─────────────► │ 遍历 map（GC/统计）
-```
-
-### 2.3.7 规则变更时的 Cache 处理
-
-```text
-场景：用户通过 API 更新规则
-      │
-      ▼
-Rule Engine 重新加载规则
-      │
-      ▼
-Conntrack Cache 进入 "draining" 模式
-  - 已有 entry 继续有效（inflight 连接不受影响）
-  - 新连接使用新规则
-      │
-      ▼
-BPF Flow Map 不立即清空（避免断连）
-  - 旧 entry 自然 TTL 过期
-  - 或标记 stale，下次命中时重新评估
-      │
-      ▼
-一定时间后（默认 60s）：
-  - 清理所有 stale entry
-  - BPF Map 回归正常
-```
-
 ---
 
 ## 2.4 可靠性与性能平衡策略
 
-### 2.4.1 三层路径隔离
+### 2.4.1 两层路径
 
 ```
-Fast Path (内核态)              Slow Path (用户态)           Admin Path (管理面)
-══════════════════              ═══════════════════         ═══════════════════
-eBPF TC Hook                   TProxy + Rule Engine        API Server
-  - 已有 flow 的内核态处理       - 新连接的规则决策          - 规则配置
-  - O(1) BPF map lookup         - Conntrack Cache 写入     - 状态查询
-  - 直连: 直接放行内核转发       - BPF Map 同步             - 系统管理
-  - 代理: 转发到 TProxy         - 首包有 μs 级延迟         - ms 级延迟可接受
-  - block: 内核丢弃
+eBPF TC Hook (数据面)              TProxy + Decision Cache (Slow Path)
+════════════════════               ════════════════════════════════════
+  - CIDR 白名单检查                  - 新目标的首次决策
+  - fwmark=1 策略路由                - Decision Cache 管理
+  - 统计计数器                       - TTL 淘汰 + GC
 ```
 
-### 2.4.2 降级策略矩阵
+### 2.4.2 Phase 2 缓存策略
 
-| 故障场景 | 降级行为 | 影响 |
-|----------|---------|------|
-| eBPF 加载失败 | 回退到 iptables TPROXY | 无 Fast Path，全量 Slow Path |
-| Flow BPF Map 满 | 使用 LRU 淘汰旧 entry 或**退化为全 Slow Path** | 性能降级 |
-| sing-box 核心故障 | 全部流量切为 direct | DNS 正常，无代理 |
+| 场景 | 策略 | 说明 |
+|------|------|------|
+| 缓存满 | LRU 淘汰 | 移除最久未命中条目 |
+| TTL 过期 | 自动删除 | 默认 3600s |
+| 进程重启 | 缓存丢失 | 自动 warmup（warmup 期间退化为无缓存）|
+| 规则变更 | 被动等待 TTL 过期 | Phase 5 实现 draining 模式 |
 | 单个 proxy 节点故障 | Health Checker 自动切到同 tag 内下一节点 | 单节点不可用 |
 | DNS 子系统故障 | 将 DNS 查询直接透传到上游 DNS | DNS 无分流 |
 | 规则文件加载失败 | 使用最后成功加载的规则集 | 规则不更新 |
