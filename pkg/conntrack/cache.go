@@ -74,6 +74,14 @@ func (c *Cache) Insert(key CacheKey, d uint8) {
 	}
 }
 
+// InsertWithBPF 写入缓存并同步到 BPF Flow Cache
+func (c *Cache) InsertWithBPF(key CacheKey, d uint8, bpfFn func(CacheKey, uint8) error) {
+	c.Insert(key, d)
+	if bpfFn != nil {
+		_ = bpfFn(key, d)
+	}
+}
+
 // Lookup 查询缓存，返回缓存的决策和命中计数
 // 如果不存在或已过期，返回 DecisionProxy 作为默认值
 func (c *Cache) Lookup(key CacheKey) (Decision, uint64, bool) {

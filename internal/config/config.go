@@ -13,6 +13,7 @@ type Config struct {
 	Log    LogConfig    `yaml:"log"`
 	Proxy  ProxyConfig  `yaml:"proxy"`
 	DNS    DNSConfig    `yaml:"dns"`
+	Rule   RuleSection  `yaml:"rule"`
 	TProxy TProxyConfig `yaml:"tproxy"`
 	BPF    BPFConfig    `yaml:"bpf"`
 	API    APIConfig    `yaml:"api"`
@@ -88,6 +89,12 @@ type APIConfig struct {
 	Listen string `yaml:"listen"` // e.g. :8080
 	Enable bool   `yaml:"enable"`
 	Auth   string `yaml:"auth,omitempty"`
+}
+
+// RuleSection defines rule engine configuration.
+type RuleSection struct {
+	GeoIPPath   string `yaml:"geoip_path"`
+	GeoSitePath string `yaml:"geosite_path"`
 }
 
 // RuleConfig defines a single routing rule.
