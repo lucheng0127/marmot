@@ -1,0 +1,62 @@
+# Marmot Configuration Example
+# This file contains all configurable options.
+
+# ===== Logging =====
+log:
+  level: info          # debug, info, warn, error
+  format: text         # text, json
+  output: stdout       # stdout, stderr, or file path
+
+# ===== TProxy =====
+tproxy:
+  tcp_addr: ":1080"          # TCP TProxy listen address
+  udp_addr: ":1080"          # UDP TProxy listen address
+  outbound_addr: "127.0.0.1:10800"  # Outbound engine (Xray/sing-box SOCKS5 address)
+
+# ===== eBPF =====
+bpf:
+  interface: br0             # Bridge interface for TC ingress hook
+  cidr_whitelist:            # CIDRs that bypass proxy (direct)
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+
+# ===== DNS =====
+dns:
+  listen: ":53"              # DNS server listen address
+  cache_size: 1024
+  cache_ttl: 300             # seconds
+  upstreams:
+    - type: udp
+      address: "223.5.5.5:53"
+      tag: aliyun
+    - type: doh
+      address: "https://dns.google/dns-query"
+      tag: google-doh
+    - type: dot
+      address: "1.1.1.1:853"
+      tag: cloudflare-dot
+
+# ===== Rule Engine =====
+rule:
+  geoip_path: "geodb/GeoLite2-Country.mmdb"
+  geosite_path: "geodb/geosite.dat"
+
+# ===== Rules =====
+rules:
+  - type: geoip
+    match: CN
+    action:
+      mode: direct
+  - type: domain_suffix
+    match: .cn
+    action:
+      mode: direct
+  - type: default
+    match: ""
+    action:
+      mode: proxy
+
+api:
+  listen: ":8080"
+  auth: ""
