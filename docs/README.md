@@ -14,7 +14,7 @@
 | 2 | [总体架构设计](02-architecture-overview.md) | 五大子系统、Conntrack Fast Cache、Fast/Slow Path、可观测性 | ✅ |
 | 3 | [数据面设计](03-data-plane-design.md) | BPF Map Schema、Flow Cache、Conntrack Cache、TProxy 全链路 | ✅ |
 | 4 | [模块划分设计](04-modules.md) | 目录结构、模块依赖、初始化顺序 | ✅ |
-| 5 | [架构决策记录](05-adr.md) | 4 个关键 ADR | ✅ |
+| 5 | [架构决策记录](05-adr.md) | 8 个关键 ADR | ✅ |
 | 6 | [风险分析](06-risks.md) | 7 项风险 + 缓解措施 | ✅ |
 | 7 | [开发计划](07-development-plan.md) | 测试环境分级 + Phase 0-5 | ✅ |
 | 8 | [Bridge TC Path Investigation](08-bridge-tc-path-investigation.md) | Hook Point 分析对比 | ✅ |
