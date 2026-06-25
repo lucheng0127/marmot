@@ -70,8 +70,9 @@ type DNSUpstream struct {
 
 // TProxyConfig defines TProxy listener configuration.
 type TProxyConfig struct {
-	TCPAddr string `yaml:"tcp_addr"` // e.g. :1080
-	UDPAddr string `yaml:"udp_addr"` // e.g. :1080
+	TCPAddr      string `yaml:"tcp_addr"`       // e.g. :1080
+	UDPAddr      string `yaml:"udp_addr"`       // e.g. :1080
+	OutboundAddr string `yaml:"outbound_addr"`  // e.g. 127.0.0.1:10800 (Xray dokodemo-door)
 }
 
 // BPFConfig defines eBPF program configuration.

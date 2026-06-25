@@ -65,19 +65,13 @@ func (s *Server) Run() error {
 	// ── 3. Decision Interface ──
 	s.decider = tproxy.NewStaticDecider()
 
-	// ── 4. TProxy ──
-	s.tproxy = tproxy.NewListener(s.cfg.TProxy.TCPAddr, s.decider, s.cache)
-	if err := s.tproxy.Start(); err != nil {
-		return err
-	}
-
-	// ── 5. Node Manager ──
+	// ── 4. Node Manager ──
 	s.nodeMgr = proxy.NewNodeManager()
 	for tag, nodeCfg := range s.cfg.Proxy.Nodes {
 		s.nodeMgr.AddNode(tag, nodeCfg)
 	}
 
-	// ── 6. Options Converter + Engine ──
+	// ── 5. Options Converter + Engine ──
 	s.optsConv = proxy.NewOptionsConverter()
 	options := s.optsConv.ToOptions(s.nodeMgr)
 	s.proxyEngine, err = proxy.New(s.ctx, options)
@@ -90,6 +84,22 @@ func (s *Server) Run() error {
 	log.Info("sing-box engine started", map[string]interface{}{
 		"nodes": s.nodeMgr.Count(),
 	})
+
+	// ── 6. TProxy (with relay to outbound) ──
+	// Phase 3: relay addr = Xray dokodemo-door (configurable)
+	relayAddr := s.cfg.TProxy.OutboundAddr
+	if relayAddr == "" {
+		relayAddr = "127.0.0.1:10800" // default Xray dokodemo-door
+	}
+	s.tproxy = tproxy.NewListener(
+		s.cfg.TProxy.TCPAddr,
+		s.decider,
+		s.cache,
+		relayAddr,
+	)
+	if err := s.tproxy.Start(); err != nil {
+		return err
+	}
 
 	// ── 7. Health Checker ──
 	s.healthChk = proxy.NewHealthChecker(s.nodeMgr, 30*time.Second, 5*time.Second)
