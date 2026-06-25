@@ -5,6 +5,8 @@
 
 Marmot 是一个基于 eBPF + sing-box 的透明代理网关系统，支持 GeoIP/GeoSite 智能分流、TCP/UDP TProxy、DNS 防污染。
 
+支持的代理协议：**VLESS、VMess、Shadowsocks、Trojan、Hysteria2、WireGuard、TUIC**（通过 sing-box 或 Xray 作为 outbound engine）。
+
 ## Architecture
 
 ```

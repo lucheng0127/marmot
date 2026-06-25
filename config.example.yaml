@@ -7,11 +7,86 @@ log:
   format: text         # text, json
   output: stdout       # stdout, stderr, or file path
 
+# ===== Proxy Outbound =====
+# Proxy nodes are configured as sing-box outbound options.
+# Each entry is a tag -> option.Outbound mapping.
+# See https://sing-box.sagernet.org/configuration/outbound/ for full reference.
+proxy:
+  nodes:
+    # VLESS + REALITY (e.g. Japan/Singapore nodes)
+    proxy-jp01:
+      type: vless
+      server: jp01.example.com
+      server_port: 443
+      uuid: "your-uuid-here"
+      flow: xtls-rprx-vision
+      tls:
+        enabled: true
+        server_name: www.samsung.com
+        reality:
+          enabled: true
+          public_key: "your-public-key"
+          short_id: "4c9fbcb1"
+      multiplex:
+        enabled: true
+        protocol: h2mux
+
+    # Shadowsocks
+    proxy-ss:
+      type: shadowsocks
+      server: ss.example.com
+      server_port: 8388
+      method: 2022-blake3-aes-128-gcm
+      password: "your-password"
+
+    # VMess + WebSocket + TLS
+    proxy-vmess:
+      type: vmess
+      server: hk01.example.com
+      server_port: 443
+      uuid: "your-uuid-here"
+      security: auto
+      tls:
+        enabled: true
+        server_name: www.12306.cn
+        insecure: true
+      transport:
+        type: grpc
+        service_name: "12306"
+
+    # Trojan
+    proxy-trojan:
+      type: trojan
+      server: trojan.example.com
+      server_port: 443
+      password: "your-password"
+      tls:
+        enabled: true
+
+    # Hysteria2
+    proxy-hy2:
+      type: hysteria2
+      server: hy2.example.com
+      server_port: 443
+      password: "your-password"
+      tls:
+        enabled: true
+        server_name: www.example.com
+
+  # Node groups for failover/load-balancing
+  groups:
+    - name: "proxy-priority"
+      nodes:
+        - proxy-jp01
+        - proxy-ss
+        - proxy-vmess
+      strategy: "failover"  # failover, round-robin, least-ping
+
 # ===== TProxy =====
 tproxy:
   tcp_addr: ":1080"          # TCP TProxy listen address
   udp_addr: ":1080"          # UDP TProxy listen address
-  outbound_addr: "127.0.0.1:10800"  # Outbound engine (Xray/sing-box SOCKS5 address)
+  outbound_addr: "127.0.0.1:10800"  # Outbound engine SOCKS5 address
 
 # ===== eBPF =====
 bpf:
@@ -39,10 +114,12 @@ dns:
 
 # ===== Rule Engine =====
 rule:
+  # GeoIP database path (MaxMind GeoLite2 format, .mmdb)
   geoip_path: "geodb/GeoLite2-Country.mmdb"
   geosite_path: "geodb/geosite.dat"
 
 # ===== Rules =====
+# Priority: domain > domain_suffix > domain_keyword > geosite > ip_cidr > geoip > default
 rules:
   - type: geoip
     match: CN
@@ -57,6 +134,7 @@ rules:
     action:
       mode: proxy
 
+# ===== HTTP API =====
 api:
   listen: ":8080"
   auth: ""
