@@ -1,5 +1,4 @@
-// Flow Learning Verification Tool
-// Tests: FlowMiss → Decision → Writeback → FlowHit
+// Flow Learning Verification — Phase 2 simplified
 package main
 
 import (
@@ -24,8 +23,7 @@ func main() {
 
 	log.Init(log.DebugLevel, "text", "stdout")
 
-	// 1. Load BPF
-	log.Info("1. Loading eBPF")
+	// 1. Load eBPF (CIDR + fwmark only)
 	mgr := bpf.NewManager(*iface)
 	result, err := mgr.Load()
 	if err != nil {
@@ -33,91 +31,65 @@ func main() {
 		os.Exit(1)
 	}
 	defer mgr.Unload()
-	log.Info("BPF loaded")
-
-	// 2. Add CIDR whitelist
 	mgr.AddCIDR("192.168.100.0/24")
-	log.Info("CIDR whitelist added")
+	_ = result
 
-	// 3. Create Conntrack Cache
-	ctCache := conntrack.New(1*time.Hour, 65536)
+	// 2. Create Decision Cache (pure target key)
+	cache := conntrack.New(1*time.Hour, 65536)
 
-	// 4. Create SyncManager + connect to BPF Flow Map
-	ctSync := conntrack.NewSyncManager(result.TcpFlowMap, result.UdpFlowMap, ctCache)
-	ctSync.Connect()
-	log.Info("Flow Map sync connected")
-
-	// 5. Create Decision Interface + TProxy
+	// 3. Decision Interface + TProxy
 	decider := tproxy.NewStaticDecider()
-	tpListener := tproxy.NewListener(*tproxyAddr, decider, ctCache)
-	if err := tpListener.Start(); err != nil {
+	listener := tproxy.NewListener(*tproxyAddr, decider, cache)
+	if err := listener.Start(); err != nil {
 		log.Error("TProxy start failed", map[string]interface{}{"error": err.Error()})
 		os.Exit(1)
 	}
-	log.Info("TProxy listening", map[string]interface{}{"addr": *tproxyAddr})
-
-	// 6. Reset stats
-	mgr.Stats.Reset()
+	defer listener.Close()
 
 	fmt.Println("\n========================================")
-	fmt.Println("Flow Learning Verification")
+	fmt.Println("Phase 2 — TProxy + Decision Cache")
 	fmt.Println("========================================")
 	fmt.Println()
-	fmt.Println("Step 1: Send FIRST request to external IP")
-	fmt.Println("  ip netns exec ns-client curl -m 3 http://198.51.100.1:8080/ 2>&1 | head -2")
-	fmt.Println("  (expect: connection reset or timeout == Flow Cache MISS → TProxy)")
-	fmt.Println()
-	fmt.Println("Step 2: Check Flow Cache Writeback")
-	fmt.Println("  (verify BPF Flow Map has entry)")
-	fmt.Println()
-	fmt.Println("Step 3: Send SECOND request to SAME target")
-	fmt.Println("  ip netns exec ns-client curl -m 3 http://198.51.100.1:8080/ 2>&1 | head -2")
-	fmt.Println("  (expect: Flow Cache HIT → TC mark → TProxy)")
+	fmt.Println("Send traffic:")
+	fmt.Println("  ip netns exec ns-client curl -m 3 http://203.0.113.1:8080/")
 	fmt.Println()
 
-	// Report loop
+	// Stats display loop
 	ticker := time.NewTicker(3 * time.Second)
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	prevStats, _ := mgr.Stats.Read()
-	prevFlowCount := 0
+	prevCacheCount := 0
 
 loop:
 	for {
 		select {
 		case <-ticker.C:
 			snap, _ := mgr.Stats.Read()
-			flowCount, _ := bpf.NewTCPFlowMapOps(result.TcpFlowMap).Count()
+			cacheCount, _ := cache.Stats()
 
 			fmt.Printf("\n--- %s ---\n", time.Now().Format("15:04:05"))
 			fmt.Print(snap.String())
-			fmt.Printf("  flow_map_entries: %d\n", flowCount)
-			fmt.Printf("  conntrack_cache:  %d\n", ctCache.Count())
+			fmt.Printf("  cache_entries: %d\n", cacheCount)
 
-			// Detect Flow Learning
-			if snap.FlowMiss > prevStats.FlowMiss {
-				fmt.Printf("  >>> FlowCacheMISS detected (+%d) <<<\n", snap.FlowMiss-prevStats.FlowMiss)
+			if snap.ProxyMark > prevStats.ProxyMark {
+				delta := snap.ProxyMark - prevStats.ProxyMark
+				fmt.Printf("  >>> Traffic detected: +%d packets marked <<<\n", delta)
 			}
-			if snap.FlowHit > prevStats.FlowHit {
-				fmt.Printf("  >>> FlowCacheHIT detected (+%d) <<< 🎉\n", snap.FlowHit-prevStats.FlowHit)
-				fmt.Println("  *** FLOW LEARNING VERIFIED ***")
-			}
-			if flowCount > 0 && prevFlowCount == 0 && flowCount > prevFlowCount {
-				fmt.Printf("  Flow written to TCP_flow_map: now %d entries\n", flowCount)
+			if cacheCount > prevCacheCount {
+				fmt.Printf("  >>> Decision Cache entry added: now %d entries <<<\n", cacheCount)
 			}
 			prevStats = snap
-			prevFlowCount = flowCount
+			prevCacheCount = cacheCount
 
 		case sig := <-sigCh:
-			log.Info("signal received", map[string]interface{}{"signal": sig.String()})
+			log.Info("signal", map[string]interface{}{"signal": sig.String()})
 			break loop
 		}
 	}
 
-	tpListener.Close()
 	log.Info("test complete")
 }
 
-// Ensure net is used
 var _ = net.IPv4

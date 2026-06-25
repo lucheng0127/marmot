@@ -3,38 +3,40 @@ package conntrack
 import (
 	"sync"
 	"time"
-
-	"github.com/lucheng0127/marmot/pkg/tproxy"
 )
 
-// FlowKey is the 5-tuple identifying a network flow.
-// Reuses tproxy.FlowKey to ensure type compatibility with TProxy.
-type FlowKey = tproxy.FlowKey
-
-// FlowEntry stores the cached decision for a single flow.
-// Per Phase 2 design: DO NOT add Domain/RuleID/DNS fields here.
-// This is a Flow cache, not a Rule cache.
-type FlowEntry struct {
-	Decision tproxy.Decision // Direct or Proxy
-	LastSeen time.Time       // last access time, used for GC eviction
-	HitCount uint64          // number of times this flow was looked up
+// CacheKey — 纯目标 key（路由决策仅基于目标地址）
+// SrcIP / SrcPort 不参与决策，因此不在 cache key 中。
+type CacheKey struct {
+	DstIP    uint32
+	DstPort  uint16
+	Protocol uint8
 }
 
-// Cache is the Conntrack Cache — a thread-safe in-memory map
-// that stores flow decisions and syncs them to the BPF Flow Map.
+// CacheEntry — 缓存的决策结果
+type CacheEntry struct {
+	Decision Decision // Direct / Proxy
+	LastSeen time.Time
+	HitCount uint64
+}
+
+// Decision — 简化决策结果
+type Decision uint8
+
+const (
+	DecisionDirect Decision = iota
+	DecisionProxy
+)
+
+// Cache — 用户态 Decision Cache，线程安全，纯目标 key
 type Cache struct {
 	mu      sync.RWMutex
-	entries map[FlowKey]*FlowEntry
+	entries map[CacheKey]*CacheEntry
 	ttl     time.Duration
 	maxSize int
-
-	// BPF sync callback — set by the integration layer
-	BPFWriter func(key FlowKey, d tproxy.Decision) error
 }
 
-// New creates a new Conntrack Cache.
-// ttl: entry time-to-live (default 1h for TCP, 2min for UDP)
-// maxSize: maximum number of entries before LRU eviction
+// New 创建用户态 Decision Cache
 func New(ttl time.Duration, maxSize int) *Cache {
 	if ttl <= 0 {
 		ttl = 1 * time.Hour
@@ -43,99 +45,80 @@ func New(ttl time.Duration, maxSize int) *Cache {
 		maxSize = 65536
 	}
 	return &Cache{
-		entries: make(map[FlowKey]*FlowEntry),
+		entries: make(map[CacheKey]*CacheEntry),
 		ttl:     ttl,
 		maxSize: maxSize,
 	}
 }
 
-// Insert adds or updates a flow entry.
-// It also triggers BPF map writeback if BPFWriter is set.
-func (c *Cache) Insert(key FlowKey, d tproxy.Decision) error {
+// Insert 添加或更新缓存条目
+func (c *Cache) Insert(key CacheKey, d uint8) {
 	c.mu.Lock()
-	now := time.Now()
+	defer c.mu.Unlock()
 
 	entry, exists := c.entries[key]
+	now := time.Now()
 	if exists {
-		entry.Decision = d
+		entry.Decision = Decision(d)
 		entry.LastSeen = now
 		entry.HitCount++
 	} else {
-		// Check size limit before inserting
 		if len(c.entries) >= c.maxSize {
 			c.evictLocked()
 		}
-		c.entries[key] = &FlowEntry{
-			Decision: d,
+		c.entries[key] = &CacheEntry{
+			Decision: Decision(d),
 			LastSeen: now,
 			HitCount: 1,
 		}
 	}
-	c.mu.Unlock()
-
-	// Sync to BPF map (outside the lock)
-	if c.BPFWriter != nil {
-		if err := c.BPFWriter(key, d); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
-// Lookup retrieves a flow entry.
-// Returns nil if the entry doesn't exist or has expired.
-func (c *Cache) Lookup(key FlowKey) *FlowEntry {
+// Lookup 查询缓存，返回缓存的决策和命中计数
+// 如果不存在或已过期，返回 DecisionProxy 作为默认值
+func (c *Cache) Lookup(key CacheKey) (Decision, uint64, bool) {
 	c.mu.RLock()
 	entry, exists := c.entries[key]
 	if !exists {
 		c.mu.RUnlock()
-		return nil
+		return DecisionProxy, 0, false
 	}
-
-	// Check TTL expiration
 	if time.Since(entry.LastSeen) > c.ttl {
 		c.mu.RUnlock()
 		c.Delete(key)
-		return nil
+		return DecisionProxy, 0, false
 	}
-
 	entry.HitCount++
+	d := entry.Decision
+	hc := entry.HitCount
 	c.mu.RUnlock()
-	return entry
+	return d, hc, true
 }
 
-// Delete removes a flow entry from the cache.
-func (c *Cache) Delete(key FlowKey) {
+// Delete 删除缓存条目
+func (c *Cache) Delete(key CacheKey) {
 	c.mu.Lock()
 	delete(c.entries, key)
 	c.mu.Unlock()
 }
 
-// evictLocked evicts the oldest entries when the cache is full.
-// Must be called with c.mu held.
+// evictLocked 淘汰最旧条目（满时）
 func (c *Cache) evictLocked() {
 	if len(c.entries) < c.maxSize {
 		return
 	}
-
-	// Remove 10% of oldest entries
 	target := c.maxSize / 10
 	if target < 1 {
 		target = 1
 	}
-
-	// Find oldest entries by LastSeen
 	type kv struct {
-		key FlowKey
-		val *FlowEntry
+		key CacheKey
+		val *CacheEntry
 	}
 	var oldest []kv
 	for k, v := range c.entries {
 		oldest = append(oldest, kv{k, v})
 	}
-
-	// Sort by LastSeen ascending (oldest first)
 	for i := 0; i < len(oldest); i++ {
 		for j := i + 1; j < len(oldest); j++ {
 			if oldest[j].val.LastSeen.Before(oldest[i].val.LastSeen) {
@@ -143,19 +126,15 @@ func (c *Cache) evictLocked() {
 			}
 		}
 	}
-
-	// Remove oldest entries
 	for i := 0; i < target && i < len(oldest); i++ {
 		delete(c.entries, oldest[i].key)
 	}
 }
 
-// GC runs garbage collection, removing expired entries.
-// Returns the number of entries removed.
+// GC 清理过期条目
 func (c *Cache) GC() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	now := time.Now()
 	removed := 0
 	for key, entry := range c.entries {
@@ -167,14 +146,14 @@ func (c *Cache) GC() int {
 	return removed
 }
 
-// Count returns the current number of entries in the cache.
+// Count 返回当前条目数
 func (c *Cache) Count() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.entries)
 }
 
-// StartGC launches a background goroutine that runs GC periodically.
+// StartGC 启动后台 GC
 func (c *Cache) StartGC(interval time.Duration, stop <-chan struct{}) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -182,13 +161,22 @@ func (c *Cache) StartGC(interval time.Duration, stop <-chan struct{}) {
 		for {
 			select {
 			case <-ticker.C:
-				removed := c.GC()
-				if removed > 0 {
-					_ = removed // log if needed later
-				}
+				c.GC()
 			case <-stop:
 				return
 			}
 		}
 	}()
+}
+
+// Stats 返回缓存统计
+func (c *Cache) Stats() (int, int) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	total := len(c.entries)
+	hits := 0
+	for _, e := range c.entries {
+		hits += int(e.HitCount)
+	}
+	return total, hits
 }

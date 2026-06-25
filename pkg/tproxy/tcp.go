@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/lucheng0127/marmot/pkg/conntrack"
 	"github.com/lucheng0127/marmot/pkg/log"
 )
 
@@ -19,16 +20,15 @@ type Listener struct {
 	ln      net.Listener
 }
 
-// FlowCacheWriter is the interface Conntrack Cache must implement
-// for TProxy to write back flow decisions.
+// FlowCacheWriter is the interface the Decision Cache must implement.
 type FlowCacheWriter interface {
-	Insert(key FlowKey, decision Decision) error
+	Insert(key conntrack.CacheKey, decision uint8)
 }
 
 // NewListener creates a new TProxy TCP listener.
 // addr: listening address like ":1080"
 // decider: Decision Interface
-// cache: Conntrack Cache for Flow writeback
+// cache: Decision Cache for cross-connection sharing
 func NewListener(addr string, decider Decider, cache FlowCacheWriter) *Listener {
 	return &Listener{
 		addr:    addr,
@@ -105,35 +105,54 @@ func (l *Listener) handleConn(conn net.Conn) {
 		return
 	}
 
-	// Build 5-tuple flow key
-	localAddr := conn.LocalAddr().(*net.TCPAddr)
+	// Check Decision Cache first (pure target key — cross-connection HIT)
+	cacheKey := conntrack.CacheKey{
+		DstIP:     IPToUint32(origAddr.IP),
+		DstPort:   htons(uint16(origAddr.Port)),
+		Protocol:  6, // TCP
+	}
+
+	var decision uint8
+	if l.cache != nil {
+		// Decision Cache Lookup (type assertion to access Lookup)
+		type cacheLookupper interface {
+			Lookup(conntrack.CacheKey) (conntrack.Decision, uint64, bool)
+		}
+		if cl, ok := l.cache.(cacheLookupper); ok {
+			if d, _, hit := cl.Lookup(cacheKey); hit {
+				decision = uint8(d)
+				log.Debug("Decision Cache HIT", map[string]interface{}{
+					"target": origAddr.String(),
+				})
+			}
+		}
+	}
+
+	// If cache miss, use Decision Interface
 	flowKey := FlowKey{
 		DstIP:   IPToUint32(origAddr.IP),
 		DstPort: htons(uint16(origAddr.Port)),
-		Protocol: 6, // TCP
+		Protocol: 6,
 	}
 	if remoteAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
 		flowKey.SrcIP = IPToUint32(remoteAddr.IP)
 		flowKey.SrcPort = htons(uint16(remoteAddr.Port))
 	}
 
-	// Make decision via Decision Interface
-	decision := l.decider.Decide(flowKey)
+	if decision == 0 && l.decider != nil {
+		decision = uint8(l.decider.Decide(flowKey))
+	}
 
 	log.Debug("TProxy connection", map[string]interface{}{
 		"src":      conn.RemoteAddr().String(),
 		"orig_dst": origAddr.String(),
-		"local":    localAddr.String(),
-		"decision": decisionName(decision),
+		"local":    origAddr.String(),
+		"decision": decisionName(Decision(decision)),
 	})
 
-	// Write decision to Conntrack Cache → BPF Flow Map
+	// Write to Decision Cache (pure target key — cross-connection shared)
 	if l.cache != nil {
-		if err := l.cache.Insert(flowKey, decision); err != nil {
-			log.Error("cache insert failed", map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
+		l.cache.Insert(cacheKey, uint8(decision))
 	}
 
 	// Phase 2: close connection after recording.
