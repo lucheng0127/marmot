@@ -1,0 +1,34 @@
+log:
+  level: debug
+  format: text
+  output: stdout
+tproxy:
+  tcp_addr: ":1080"
+  udp_addr: ":1080"
+  outbound_addr: "127.0.0.1:10800"
+bpf:
+  interface: br-test
+  cidr_whitelist:
+    - 192.168.100.0/24
+rule:
+  geoip_path: ""
+  geosite_path: ""
+dns:
+  listen: ":53"
+  upstreams:
+    - type: udp
+      address: "223.5.5.5:53"
+      tag: aliyun
+rules:
+  - type: domain_suffix
+    match: .cn
+    action:
+      mode: direct
+  - type: domain_suffix
+    match: baidu.com
+    action:
+      mode: direct
+  - type: default
+    match: ""
+    action:
+      mode: proxy

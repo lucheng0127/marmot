@@ -1,0 +1,55 @@
+{
+  "log": {"level": "warn"},
+  "inbounds": [{
+    "type": "socks",
+    "tag": "socks-in",
+    "listen": "127.0.0.1",
+    "listen_port": 10800,
+    "sniff": false
+  }],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "proxy-jp01",
+      "server": "jp01.18adae16-f183-4aaf-9227-67dc4b27fec6.984b277d-718f-4ba8-9e06-0036b675c900.byteprivatelink.com",
+      "server_port": 443,
+      "uuid": "c13b377a-3ae5-4830-9019-add0c228ebeb",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.samsung.com",
+        "reality": {
+          "enabled": true,
+          "public_key": "aTPjxfJ5QPGxYRyQ8SRnYwyXUhuasda7i5Dc5VoKxVY",
+          "short_id": "4c9fbcb1"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "proxy-sg01",
+      "server": "sg01.18adae16-f183-4aaf-9227-67dc4b27fec6.984b277d-718f-4ba8-9e06-0036b675c900.byteprivatelink.com",
+      "server_port": 443,
+      "uuid": "c13b377a-3ae5-4830-9019-add0c228ebeb",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.samsung.com",
+        "reality": {
+          "enabled": true,
+          "public_key": "aTPjxfJ5QPGxYRyQ8SRnYwyXUhuasda7i5Dc5VoKxVY",
+          "short_id": "4c9fbcb1"
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {"outbound": "proxy-jp01", "protocol": "socks"}
+    ]
+  }
+}

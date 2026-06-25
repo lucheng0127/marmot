@@ -1,0 +1,32 @@
+log:
+  level: debug
+  format: text
+  output: stdout
+tproxy:
+  tcp_addr: ":1080"
+  udp_addr: ":1080"
+  xray_addr: "127.0.0.1:10800"
+bpf:
+  interface: br-test
+  cidr_whitelist:
+    - 192.168.100.0/24
+rule:
+  geoip_path: "/tmp/GeoLite2-Country.mmdb"
+dns:
+  listen: ":53"
+  upstreams:
+    - type: udp
+      address: "1.1.1.1:53"
+      tag: cloudflare
+    - type: udp
+      address: "223.5.5.5:53"
+      tag: aliyun
+rules:
+  - type: geoip
+    match: CN
+    action:
+      mode: direct
+  - type: default
+    match: ""
+    action:
+      mode: proxy

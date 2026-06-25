@@ -111,8 +111,10 @@ func (s *Server) Run() error {
 		return err
 	}
 
-	// 6. TCP TProxy (direct dial through sing-box engine, no SOCKS5)
+	// 6. TCP TProxy (SOCKS5 relay via Xray, with sing-box dialer fallback)
+	relayAddr := s.cfg.TProxy.OutboundAddr
 	s.tproxy = tproxy.NewListener(s.cfg.TProxy.TCPAddr, s.decider, s.cache,
+		relayAddr,
 		func(network, addr string) (net.Conn, error) {
 			return s.proxyEngine.DialTimeout(network, addr, 30*time.Second)
 		})

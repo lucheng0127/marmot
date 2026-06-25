@@ -46,9 +46,8 @@ func (e *Engine) Close() error {
 	return e.box.Close()
 }
 
-// DialTimeout wraps DialContext with a timeout.
-// Used by TProxy relay to connect through sing-box's outbound engine.
-// This eliminates the need for a separate Xray/sing-box process.
+// DialTimeout connects through the sing-box outbound engine.
+// TProxy relay uses this when SOCKS5 relay is not configured.
 func (e *Engine) DialTimeout(network, addr string, timeout time.Duration) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()

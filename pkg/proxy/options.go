@@ -17,7 +17,6 @@ func NewOptionsConverter() *OptionsConverter {
 }
 
 // ToOptions builds sing-box option.Options from a list of outbound tags.
-// Each tag is mapped to a node in the NodeManager.
 func (c *OptionsConverter) ToOptions(nm *NodeManager) option.Options {
 	var outbounds []option.Outbound
 
@@ -28,13 +27,29 @@ func (c *OptionsConverter) ToOptions(nm *NodeManager) option.Options {
 		outbounds = append(outbounds, o)
 	}
 
+	// Add a direct outbound as fallback
+	outbounds = append(outbounds, option.Outbound{
+		Tag:  "direct",
+		Type: "direct",
+	})
+
+	// Set the first node as final (default) outbound, fallback to direct
+	finalTag := "direct"
+	for _, node := range nm.nodes {
+		finalTag = node.Tag
+		break
+	}
+
 	return option.Options{
 		Log: &option.LogOptions{
-			Disabled:  true,
-			Level:     "warn",
+			Disabled: true,
+			Level:    "warn",
 		},
-		Inbounds:  []option.Inbound{},  // No inbound — Marmot handles TProxy
+		Inbounds:  []option.Inbound{},
 		Outbounds: outbounds,
+		Route: &option.RouteOptions{
+			Final: finalTag,
+		},
 	}
 }
 
