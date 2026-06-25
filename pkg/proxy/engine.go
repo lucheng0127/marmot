@@ -12,6 +12,8 @@ import (
 	"github.com/sagernet/sing-box/option"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+
+	"github.com/lucheng0127/marmot/pkg/log"
 )
 
 type Engine struct {
@@ -40,18 +42,21 @@ func New(ctx context.Context, options option.Options) (*Engine, error) {
 }
 
 func (e *Engine) Start() error { return e.box.Start() }
+func (e *Engine) Close() error { e.cancel(); return e.box.Close() }
 
-func (e *Engine) Close() error {
-	e.cancel()
-	return e.box.Close()
-}
-
-// DialTimeout connects through the sing-box outbound engine.
-// TProxy relay uses this when SOCKS5 relay is not configured.
 func (e *Engine) DialTimeout(network, addr string, timeout time.Duration) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
 	dest := M.ParseSocksaddr(addr)
+	log.Debug("sing-box dial", map[string]interface{}{
+		"network":   network,
+		"addr":      addr,
+		"fqdn":      dest.IsFqdn(),
+		"is_ip":     dest.IsIP(),
+		"is_valid":  dest.IsValid(),
+		"addr_str":  dest.Addr.String(),
+		"addr_port": dest.Port,
+	})
 	conn, err := e.dialer.DialContext(ctx, network, dest)
 	if err != nil {
 		return nil, fmt.Errorf("sing-box dial %s: %w", addr, err)

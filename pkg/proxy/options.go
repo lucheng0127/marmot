@@ -42,13 +42,21 @@ func (c *OptionsConverter) ToOptions(nm *NodeManager) option.Options {
 
 	return option.Options{
 		Log: &option.LogOptions{
-			Disabled: true,
+			Disabled: false,
 			Level:    "warn",
 		},
 		Inbounds:  []option.Inbound{},
 		Outbounds: outbounds,
 		Route: &option.RouteOptions{
 			Final: finalTag,
+		},
+		DNS: &option.DNSOptions{
+			RawDNSOptions: option.RawDNSOptions{
+				Servers: []option.DNSServerOptions{
+					{Type: "local", Tag: "system"},
+				},
+				Final: "system",
+			},
 		},
 	}
 }

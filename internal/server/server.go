@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -94,10 +95,12 @@ func (s *Server) Run() error {
 	// 6. Decision Interface — Rule Engine Decider
 	s.decider = tproxy.NewRuleEngineDecider(s.ruleEngine)
 
-	// 7. Node Manager
+	// 7. Node Manager (parse via JSON for proper nested options)
 	s.nodeMgr = proxy.NewNodeManager()
 	for tag, nodeCfg := range s.cfg.Proxy.Nodes {
-		s.nodeMgr.AddNode(tag, nodeCfg)
+		if raw, err := json.Marshal(nodeCfg); err == nil {
+			_ = s.nodeMgr.AddNodeJSON(tag, raw)
+		}
 	}
 
 	// 5. sing-box Engine
@@ -113,11 +116,12 @@ func (s *Server) Run() error {
 
 	// 6. TCP TProxy (SOCKS5 relay via Xray, with sing-box dialer fallback)
 	relayAddr := s.cfg.TProxy.OutboundAddr
+	var engineDial tproxy.DialFunc = func(network, addr string) (net.Conn, error) {
+		return s.proxyEngine.DialTimeout(network, addr, 30*time.Second)
+	}
 	s.tproxy = tproxy.NewListener(s.cfg.TProxy.TCPAddr, s.decider, s.cache,
 		relayAddr,
-		func(network, addr string) (net.Conn, error) {
-			return s.proxyEngine.DialTimeout(network, addr, 30*time.Second)
-		})
+		engineDial)
 	if err := s.tproxy.Start(); err != nil {
 		return err
 	}

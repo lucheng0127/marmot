@@ -22,13 +22,13 @@ jobs:
           cache: true
 
       - name: Build (linux/amd64)
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/marmot ./cmd/marmot/
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags with_utls -o build/marmot ./cmd/marmot/
 
       - name: Cross-compile (linux/arm)
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -o build/marmot-arm ./cmd/marmot/
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -tags with_utls -o build/marmot-arm ./cmd/marmot/
 
       - name: Cross-compile (linux/arm64)
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o build/marmot-arm64 ./cmd/marmot/
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags with_utls -o build/marmot-arm64 ./cmd/marmot/
 
       - name: Tidy check
         run: |
