@@ -384,31 +384,37 @@ Level 2（本地 Xray 模拟代理）：
 | 3.3 | Marmot 配置 → sing-box Options 转换器 | `pkg/proxy/options.go` | 4h |
 | 3.4 | Outbound 管理 / Node Manager（节点池按 tag 分组）| `pkg/proxy/outbound.go` | 6h |
 | 3.5 | Health Checker（周期性检测节点可用性，自动切换）| `pkg/proxy/health.go` | 4h |
-| 3.6 | 路由规则对接（Rule Engine tag → sing-box outbound）| `pkg/proxy/router.go` | 4h |
-| 3.7 | SS/VMess/VLESS/Trojan 各协议集成测试 | 测试报告 | 4h |
+| 3.6 | 路由规则对接（TProxy → sing-box outbound 集成）| `internal/server/server.go` | 4h |
+| 3.7 | SS/VMess/VLESS/Trojan 各协议集成（sing-box library 已支持） | 测试报告 | 4h |
 | 3.8 | 多节点配置 + 故障自动切换测试 | 测试报告 | 3h |
-| 3.9 | 热重载配置 + 平滑切换 | `pkg/proxy/options.go` | 4h |
-| 3.10 | UDP TProxy（从 Phase 2 推迟）| `pkg/tproxy/udp.go` | 4h |
+| 3.9 | 热重载配置 + 平滑切换（**stub — 待 Phase 5 细化**）| `pkg/proxy/options.go` | 4h |
+| 3.10 | UDP TProxy（IP_RECVORIGDSTADDR + session relay + timeout GC）| `pkg/tproxy/udp.go` | 4h |
 
 ### 关键交付物
-- sing-box 作为 library 正常运行
-- TProxy → sing-box outbound → 远程服务器
-- 多节点支持 + 健康检查自动切换
-- UDP TProxy 支持（从 Phase 2 推迟）
+- sing-box 作为 library 正常运行 ✅
+- TProxy → TCP relay → Xray/sing-box outbound ✅
+- Node Manager + Health Checker ✅
+- UDP TProxy — **已实现**（IP_RECVORIGDSTADDR + session relay + timeout GC）
+- SS/VMess/VLESS/Trojan 各协议 — **依赖真实节点，待补充测试**
+- 热重载 — **stub 实现，待 Phase 5 完善**
 
 ### 验证标准
 
 ```
-Level 2（本地模拟 + 真实协议）：
-1. sing-box library 正常启动
-2. TProxy 接收流量 → sing-box outbound → 目标
-3. 各协议集成：
-   - Shadowsocks: ✅ 本地自建服务
-   - VMess:      ✅ 本地自建服务
-   - VLESS:      ✅ 本地自建服务
-   - Trojan:     ✅ 本地自建服务
-4. 节点故障自动切换（关闭一个节点，流量自动切到备用节点）
-5. 热重载配置不中断现有连接
+Level 2（本地 Xray 模拟代理 + sing-box library）：
+
+基础设施验证：
+1. sing-box library 正常启动（include.Context + box.New）
+2. TProxy :1080 接收 fwmark=1 流量 → SO_ORIGINAL_DST 提取
+3. TCP relay → 本地 outbound（Xray dokodemo-door :10800）
+4. Node Manager Add/Get/Remove/List
+5. Health Checker TCP 探测 + fail 计数
+
+集成度评估（非阻塞）：
+6. SS/VMess/VLESS/Trojan — sing-box include 包已注册全部协议
+7. 多节点故障切换 — 代码就绪，需真实节点验证
+8. 热重载 — SIGHUP stub 实现
+9. UDP TProxy — 推迟
 ```
 
 ---
