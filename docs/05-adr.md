@@ -117,7 +117,7 @@ Marmot 通过 option.Options 结构体配置 sing-box
 Marmot 控制逆流回客户端
 ```
 
-**结果**：sing-box 作为 outbound engine 以 library 形式集成，Marmot 控制面通过 `option.Options` 驱动。
+**结果**：sing-box 作为 outbound engine 以 library 形式集成，Marmot 控制面通过 `option.Options` 驱动。Inbound（TProxy）由 Marmot 自行实现，详细理由见 ADR-008。
 
 ---
 
@@ -193,6 +193,10 @@ Marmot 控制逆流回客户端
 
 **结果**：Flow Cache 作为 eBPF 与 Go 之间的桥梁，使后续包完全在内核态处理。
 
+> **2026-06-25 更新**：当前 Phase 2 使用 StaticDecider（恒 proxy），eBPF Flow Cache 无实际收益，已推迟到 Phase 5（Rule Engine 引入 non-uniform 决策后再重新引入）。
+> Phase 2 改为使用用户态 Decision Cache（纯目标 key），Phase 5 Rule Engine 就绪后重新加入 eBPF Flow Cache 实现 direct 流量绕过 TProxy。
+> 该决策不影响 ADR-005 的技术判断，仅调整实施时机。
+
 ---
 
 ## ADR-006: 为什么 GeoSite 优先级高于 GeoIP
@@ -256,3 +260,58 @@ Marmot 控制逆流回客户端
 4. **未来扩展**：如发现特定污染案例，可增量添加，不改变架构
 
 **结果**：DNS Anti-Pollution Filter 不实现，由 DoH/DoT 的 TLS 层处理。
+
+---
+
+## ADR-008: 为什么 TProxy 由 Marmot 实现而非复用 sing-box
+
+| 元数据 | 内容 |
+|--------|------|
+| 决策 ID | ADR-008 |
+| 日期 | 2026-06-25 |
+| 状态 | ✅ 已决策 |
+| 决策者 | marmot 团队 |
+
+**背景**：sing-box 内置 `tproxy` inbound 实现，支持 TCP/UDP TProxy 和多种代理协议。需要决定 TProxy 层由谁实现。
+
+**备选方案**：
+
+| 方案 | 优势 | 劣势 |
+|------|------|------|
+| Marmot 自实现 TProxy（本文案） | Flow Cache Writeback 天然集成、架构清晰、sing-box 解耦 | 需自实现 socket relay、UDP 推迟到 Phase 3 |
+| 复用 sing-box tproxy inbound | 生产验证、UDP 即用、协议覆盖广 | Flow Cache Writeback 需侵入 sing-box 生命周期，无公开 hook 点 |
+
+**决策**：✅ **TProxy 由 Marmot 自实现，sing-box 仅做 outbound engine**
+
+**理由**：
+
+1. **Flow Cache Writeback 是核心差异化能力**：Marmot 的 Fast Path 依赖于 TProxy 收到连接后立即调用 Decision Interface → 写入 BPF Flow Map。这个流程必须紧耦合在 TProxy accept 后的第一时间。sing-box 的 tproxy inbound 没有公开的连接生命周期 hook，无法在不 fork 源码的前提下插入这个步骤。
+
+2. **架构分层清晰**：
+
+   ```
+   Marmot 控制面
+     ├─ eBPF TC (数据面)
+     ├─ Flow Cache (Fast Path)
+     ├─ TProxy (Slow Path Inbound)   ← 归 Marmot
+     └─ Decision Interface
+           ↓
+   sing-box library
+     └─ Outbound Engine (SS/VMess/...)  ← 仅此层归 sing-box
+   ```
+
+3. **sing-box 解耦**：Marmot 对 sing-box 的依赖仅限于 `option.Options` 配置传递。TProxy 独立使 sing-box 版本升级不影响 Inbound 行为，反之亦然。
+
+4. **Flow Cache 架构要求**：第一次访问的路径是 `Flow MISS → TProxy accept → Decision → BPF Map Writeback → 后续 Fast Path HIT`。TProxy 是实现这个闭环的枢纽，必须完全可控。
+
+5. **性能需求**：Marmot 的 TProxy 仅做路由决策+写回，不做协议处理，开销极小。协议加解密交给 sing-box outbound。
+
+**代价**：
+
+| 代价项 | 说明 | 缓解措施 |
+|--------|------|---------|
+| 自实现 socket relay | TProxy 与 sing-box outbound 间需搬运连接数据 | 标准 `io.Copy` goroutine 模式，实现简单 |
+| UDP TProxy 推迟 | Phase 2 仅 TCP，UDP 在 Phase 3.10 | sing-box 支持 UDP outbound，Marmot 只需补 UDP socket 处理 |
+| 重新实现 TProxy 机制 | IP_TRANSPARENT + SO_ORIGINAL_DST | 已验证可行（Phase 2 已完成） |
+
+**结果**：保留 `pkg/tproxy/` 作为 Marmot 自有模块，sing-box 作为纯 outbound library 集成。UDP TProxy 作为 Phase 3.10 补充。
