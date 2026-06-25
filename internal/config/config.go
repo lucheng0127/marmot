@@ -55,17 +55,19 @@ type ProxyNode struct {
 
 // DNSConfig defines DNS subsystem configuration.
 type DNSConfig struct {
-	Listen      string        `yaml:"listen"`       // listener address for LAN clients
-	LocalListen string        `yaml:"local_listen"` // 127.0.0.1:53 for gateway itself
+	Listen      string        `yaml:"listen"`       // e.g. :53 for LAN clients
+	LocalListen string        `yaml:"local_listen"` // e.g. 127.0.0.1:53 for gateway itself
 	Upstreams   []DNSUpstream `yaml:"upstreams"`
 	CacheSize   int           `yaml:"cache_size"`
+	CacheTTL    int           `yaml:"cache_ttl"` // seconds
 }
 
 // DNSUpstream defines a single DNS upstream server.
 type DNSUpstream struct {
-	Tag      string `yaml:"tag"`
-	Protocol string `yaml:"protocol"` // udp, tcp, doh, dot
-	Addr     string `yaml:"addr"`
+	Type    string `yaml:"type"`    // udp, tcp, doh, dot
+	Address string `yaml:"address"` // e.g. 8.8.8.8:53, https://dns.google/dns-query
+	Tag     string `yaml:"tag"`     // e.g. default, doh-google, dot-cloudflare
+	Timeout int    `yaml:"timeout"` // seconds, default 5
 }
 
 // TProxyConfig defines TProxy listener configuration.
@@ -116,11 +118,12 @@ func DefaultConfig() *Config {
 		DNS: DNSConfig{
 			Listen:      ":53",
 			LocalListen: "127.0.0.1:53",
-			CacheSize:   4096,
 			Upstreams: []DNSUpstream{
-				{Tag: "domestic", Protocol: "udp", Addr: "114.114.114.114:53"},
-				{Tag: "oversea", Protocol: "doh", Addr: "https://1.1.1.1/dns-query"},
+				{Type: "udp", Address: "223.5.5.5:53", Tag: "aliyun"},
+				{Type: "doh", Address: "https://dns.google/dns-query", Tag: "google"},
 			},
+			CacheSize: 1024,
+			CacheTTL:  300,
 		},
 		BPF: BPFConfig{
 			Interface: "br0",
