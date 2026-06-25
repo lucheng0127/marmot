@@ -12,6 +12,7 @@
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/in.h>
+#include <linux/udp.h>
 #include <stdbool.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
@@ -79,7 +80,18 @@ int tc_ingress(struct __sk_buff *skb) {
         return TC_ACT_OK;
     }
 
-    /* Step 2: Not in CIDR whitelist — set fwmark=1 for TProxy */
+    /* Step 2: DNS transparent hijack — redirect to local :53 */
+    if (ip->protocol == IPPROTO_UDP) {
+        struct udphdr *udp = data + sizeof(struct ethhdr) + sizeof(struct iphdr);
+        if ((void *)(udp + 1) <= data_end) {
+            if (udp->dest == bpf_htons(53)) {
+                inc_stats(STATS_CIDR_HIT);
+                return TC_ACT_OK;
+            }
+        }
+    }
+
+    /* Step 3: Not in CIDR whitelist — set fwmark=1 for TProxy */
     inc_stats(STATS_PROXY_MARK);
     skb->mark = 1;
     return TC_ACT_OK;
