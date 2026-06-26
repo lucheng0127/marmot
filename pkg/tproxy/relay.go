@@ -29,21 +29,31 @@ func (c *idleTimeoutConn) Write(b []byte) (int, error) {
 }
 
 // copyWithIdleTimeout copies bidirectionally with idle + total timeout.
+// Waits for BOTH directions to complete (or total timeout) before returning.
 func copyWithIdleTimeout(inbound, outbound net.Conn, idle, total time.Duration) {
 	wrapIn := &idleTimeoutConn{Conn: inbound, idle: idle}
 	wrapOut := &idleTimeoutConn{Conn: outbound, idle: idle}
-	errCh := make(chan error, 2)
+
+	done := make(chan struct{}, 2)
 	go func() {
-		_, err := io.Copy(wrapOut, wrapIn)
-		errCh <- err
+		_, _ = io.Copy(wrapOut, wrapIn)
+		done <- struct{}{}
 	}()
 	go func() {
-		_, err := io.Copy(wrapIn, wrapOut)
-		errCh <- err
+		_, _ = io.Copy(wrapIn, wrapOut)
+		done <- struct{}{}
 	}()
-	select {
-	case <-errCh:
-	case <-time.After(total):
+
+	// Wait for BOTH goroutines OR total timeout
+	count := 0
+	timer := time.After(total)
+	for count < 2 {
+		select {
+		case <-done:
+			count++
+		case <-timer:
+			count = 2 // force exit on total timeout
+		}
 	}
 	_ = inbound.Close()
 	_ = outbound.Close()
