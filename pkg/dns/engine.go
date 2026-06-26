@@ -189,6 +189,12 @@ func extractQuestion(msg []byte) string {
 		buf.Write(msg[pos+1 : pos+1+length])
 		pos += 1 + length
 	}
+	// After QNAME (null-terminated): QTYPE (2 bytes) + QCLASS (2 bytes)
+	// pos is at the null terminator; QTYPE starts at pos+1
+	if pos+1+4 <= len(msg) {
+		qtype := binary.BigEndian.Uint16(msg[pos+1 : pos+3])
+		fmt.Fprintf(&buf, ":qtype=%d", qtype)
+	}
 	return buf.String()
 }
 
