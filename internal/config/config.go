@@ -78,10 +78,11 @@ type TProxyConfig struct {
 	OutboundAddr string `yaml:"outbound_addr"`  // e.g. 127.0.0.1:10800 (Xray dokodemo-door)
 }
 
-// BPFConfig defines eBPF program configuration.
+// BPFConfig defines eBPF program and LAN network configuration.
 type BPFConfig struct {
-	Interface     string   `yaml:"interface"`      // bridge interface name (br0)
-	CIDRWhitelist []string `yaml:"cidr_whitelist"` // CIDR entries for direct bypass
+	Interface     string   `yaml:"interface"`      // bridge interface name (br-test)
+	CIDRWhitelist []string `yaml:"cidr_whitelist"` // CIDR entries for direct bypass, first entry used as LAN subnet
+	LANSubnet     string   `yaml:"lan_subnet"`     // e.g. 192.168.100.0/24 (MASQUERADE source match)
 }
 
 // APIConfig defines HTTP API server configuration.
@@ -133,13 +134,9 @@ func DefaultConfig() *Config {
 			CacheTTL:  300,
 		},
 		BPF: BPFConfig{
-			Interface: "br0",
-			CIDRWhitelist: []string{
-				"10.0.0.0/8",
-				"172.16.0.0/12",
-				"192.168.0.0/16",
-				"127.0.0.0/8",
-			},
+			Interface:     "br0",
+			CIDRWhitelist: []string{"192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"},
+			LANSubnet:     "192.168.100.0/24",
 		},
 		API: APIConfig{
 			Listen: ":8080",

@@ -61,7 +61,7 @@ func (s *Server) Run() error {
 	log.Info("initializing Phase 5 subsystems")
 
 	// 0. Network rules automation (Phase 6.1)
-	s.netRules = netif.New()
+	s.netRules = netif.New(s.cfg.BPF.LANSubnet)
 	if err := s.netRules.Setup(); err != nil {
 		return err
 	}

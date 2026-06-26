@@ -134,20 +134,39 @@ func extractARecords(msg []byte) []net.IP {
 }
 
 func (e *Engine) forward(ctx context.Context, query []byte) ([]byte, error) {
-	var lastErr error
-	for _, f := range e.upstreams {
-		resp, err := f.Exchange(ctx, query)
-		if err != nil {
-			lastErr = err
-			log.Warn("upstream failed", map[string]interface{}{
-				"addr": f.config.Address,
-				"err":  err.Error(),
-			})
-			continue
-		}
-		return resp, nil
+	// Try upstreams in parallel, use first successful response
+	type result struct {
+		resp []byte
+		err  error
 	}
-	return nil, fmt.Errorf("all upstreams failed: %w", lastErr)
+	ch := make(chan result, len(e.upstreams))
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	for _, f := range e.upstreams {
+		f := f // capture
+		go func() {
+			resp, err := f.Exchange(ctx, query)
+			select {
+			case ch <- result{resp, err}:
+			default:
+			}
+		}()
+	}
+
+	var lastErr error
+	for i := 0; i < len(e.upstreams); i++ {
+		select {
+		case r := <-ch:
+			if r.err == nil && len(r.resp) > 0 {
+				return r.resp, nil
+			}
+			lastErr = r.err
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+		}
+	}
+	return nil, fmt.Errorf("dns forward failed: %w", lastErr)
 }
 
 func extractQuestion(msg []byte) string {
