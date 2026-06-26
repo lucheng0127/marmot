@@ -129,6 +129,12 @@ int tc_ingress(struct __sk_buff *skb) {
         }
     }
 
+    /* Step 2b: ICMP — bypass proxy (no TCP/UDP port to TProxy) */
+    if (ip->protocol == IPPROTO_ICMP) {
+        inc_stats(STATS_CIDR_HIT);
+        return TC_ACT_OK;
+    }
+
     /* Step 3: Flow Cache lookup */
     __u64 now = bpf_ktime_get_ns() / 1000000000ULL;
 
