@@ -133,8 +133,8 @@ func (s *Server) Run() error {
 	}
 
 	// 8. Health Checker
-	s.healthChk = proxy.NewHealthChecker(s.nodeMgr, 30*time.Second, 5*time.Second)
-	s.healthChk.Start(s.ctx)
+	hc := proxy.NewHealthChecker(s.nodeMgr, 30*time.Second, 5*time.Second)
+	hc.Start(s.ctx)
 
 	// ── Phase 4: DNS Subsystem ──
 
