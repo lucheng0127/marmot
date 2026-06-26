@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net/url"
+	"sort"
 
 	"github.com/sagernet/sing-box/option"
 )
@@ -17,13 +18,22 @@ func NewOptionsConverter() *OptionsConverter {
 }
 
 // ToOptions builds sing-box option.Options from a list of outbound tags.
-func (c *OptionsConverter) ToOptions(nm *NodeManager) option.Options {
+// Returns the options and the ordered list of node tags.
+func (c *OptionsConverter) ToOptions(nm *NodeManager) (option.Options, []string) {
 	var outbounds []option.Outbound
+	var tags []string
 
-	// Add each node as an outbound
-	for _, node := range nm.nodes {
+	// Collect and sort tags for deterministic ordering
+	for tag := range nm.nodes {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+
+	// Add each node as an outbound, sorted by tag
+	for _, tag := range tags {
+		node := nm.nodes[tag]
 		o := node.Options
-		o.Tag = node.Tag
+		o.Tag = tag
 		outbounds = append(outbounds, o)
 	}
 
@@ -33,11 +43,10 @@ func (c *OptionsConverter) ToOptions(nm *NodeManager) option.Options {
 		Type: "direct",
 	})
 
-	// Set the first node as final (default) outbound, fallback to direct
+	// Set first node as final (default), fallback to direct
 	finalTag := "direct"
-	for _, node := range nm.nodes {
-		finalTag = node.Tag
-		break
+	if len(tags) > 0 {
+		finalTag = tags[0]
 	}
 
 	return option.Options{
@@ -50,24 +59,10 @@ func (c *OptionsConverter) ToOptions(nm *NodeManager) option.Options {
 		Route: &option.RouteOptions{
 			Final: finalTag,
 		},
-		DNS: &option.DNSOptions{
-			RawDNSOptions: option.RawDNSOptions{
-				Servers: []option.DNSServerOptions{
-					{Type: "local", Tag: "system"},
-				},
-				Final: "system",
-			},
-		},
-	}
+	}, tags
 }
 
 // ParseProxyURL parses a proxy URL into an outbound option.
-// Supports formats like:
-//
-//	ss://method:password@server:port
-//	vmess://...
-//	vless://...
-//	trojan://password@server:port
 func ParseProxyURL(proxyURL string) (option.Outbound, error) {
 	u, err := url.Parse(proxyURL)
 	if err != nil {
@@ -85,9 +80,9 @@ func ParseProxyURL(proxyURL string) (option.Outbound, error) {
 	case "trojan":
 		outbound.Type = "trojan"
 	default:
-		return option.Outbound{}, fmt.Errorf("unsupported proxy type: %s", u.Scheme)
+		return option.Outbound{}, fmt.Errorf("unsupported proxy scheme: %s", u.Scheme)
 	}
 
-	outbound.Tag = u.Scheme + "-" + u.Host
+	outbound.Tag = "proxy-" + u.Scheme
 	return outbound, nil
 }

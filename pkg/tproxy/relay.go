@@ -60,7 +60,8 @@ func copyWithIdleTimeout(inbound, outbound net.Conn, idle, total time.Duration) 
 }
 
 // DialFunc connects through the proxy engine.
-type DialFunc func(network, addr string) (net.Conn, error)
+// Returns (conn, nodeTag, error).
+type DialFunc func(network, addr string) (net.Conn, string, error)
 
 // TCPRelay forwards data via SOCKS5 proxy.
 type TCPRelay struct {
@@ -128,12 +129,12 @@ func NewTCPRelay2(dial DialFunc, timeout time.Duration) *TCPRelay2 {
 }
 
 func (r *TCPRelay2) Relay(inbound net.Conn, origAddr *net.TCPAddr) error {
-	outbound, err := r.dial("tcp", origAddr.String())
+	outbound, tag, err := r.dial("tcp", origAddr.String())
 	if err != nil {
 		return err
 	}
 	log.Debug("relay started", map[string]interface{}{
-		"src": inbound.RemoteAddr().String(), "dst": origAddr.String(),
+		"src": inbound.RemoteAddr().String(), "dst": origAddr.String(), "node": tag,
 	})
 	copyWithIdleTimeout(inbound, outbound, 5*time.Second, r.timeout)
 	return nil
