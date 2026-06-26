@@ -99,14 +99,16 @@ func (s *Server) Run() error {
 	s.nodeMgr = proxy.NewNodeManager()
 	for tag, nodeCfg := range s.cfg.Proxy.Nodes {
 		if raw, err := json.Marshal(nodeCfg); err == nil {
-			_ = s.nodeMgr.AddNodeJSON(tag, raw)
+			if err := s.nodeMgr.AddNodeJSON(tag, raw); err != nil {
+				log.Warn("node add failed", map[string]interface{}{"tag": tag, "error": err.Error()})
+			}
 		}
 	}
 
 	// 5. sing-box Engine
 	s.optsConv = proxy.NewOptionsConverter()
-	options := s.optsConv.ToOptions(s.nodeMgr)
-	s.proxyEngine, err = proxy.New(s.ctx, options)
+	options, nodeTags := s.optsConv.ToOptions(s.nodeMgr)
+	s.proxyEngine, err = proxy.New(s.ctx, options, nodeTags)
 	if err != nil {
 		return err
 	}
@@ -114,9 +116,9 @@ func (s *Server) Run() error {
 		return err
 	}
 
-	// 6. TCP TProxy (SOCKS5 relay via Xray, with sing-box dialer fallback)
+	// 6. TCP TProxy (sing-box dialer fallback)
 	relayAddr := s.cfg.TProxy.OutboundAddr
-	var engineDial tproxy.DialFunc = func(network, addr string) (net.Conn, error) {
+	var engineDial tproxy.DialFunc = func(network, addr string) (net.Conn, string, error) {
 		return s.proxyEngine.DialTimeout(network, addr, 30*time.Second)
 	}
 	s.tproxy = tproxy.NewListener(s.cfg.TProxy.TCPAddr, s.decider, s.cache,

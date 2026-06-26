@@ -161,8 +161,9 @@ func (l *Listener) handleConn(conn net.Conn) {
 			})
 		}
 	} else if decision == uint8(DecisionDirect) && l.dial != nil {
-		directDial := func(network, addr string) (net.Conn, error) {
-			return net.DialTimeout(network, addr, 10*time.Second)
+		directDial := func(network, addr string) (net.Conn, string, error) {
+			conn, err := net.DialTimeout(network, addr, 10*time.Second)
+			return conn, "direct", err
 		}
 		relay := NewTCPRelay2(directDial, 30*time.Second)
 		if err := relay.Relay(conn, origAddr); err != nil {

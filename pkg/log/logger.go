@@ -97,6 +97,9 @@ func (l *Logger) writeText(level Level, msg string, fields map[string]interface{
 		fmt.Fprintf(l.out, " %s=%v", k, v)
 	}
 	fmt.Fprintln(l.out)
+	if f, ok := l.out.(*os.File); ok {
+		f.Sync()
+	}
 }
 
 // Debug logs at debug level.
