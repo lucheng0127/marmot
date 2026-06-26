@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -58,7 +61,7 @@ func (s *Server) Run() error {
 	log.Info("initializing Phase 5 subsystems")
 
 	// 0. Network rules automation (Phase 6.1)
-	s.netRules = netif.New()
+	s.netRules = netif.New(s.cfg.BPF.LANSubnet)
 	if err := s.netRules.Setup(); err != nil {
 		return err
 	}
@@ -92,10 +95,12 @@ func (s *Server) Run() error {
 	// 6. Decision Interface — Rule Engine Decider
 	s.decider = tproxy.NewRuleEngineDecider(s.ruleEngine)
 
-	// 7. Node Manager
+	// 7. Node Manager (parse via JSON for proper nested options)
 	s.nodeMgr = proxy.NewNodeManager()
 	for tag, nodeCfg := range s.cfg.Proxy.Nodes {
-		s.nodeMgr.AddNode(tag, nodeCfg)
+		if raw, err := json.Marshal(nodeCfg); err == nil {
+			_ = s.nodeMgr.AddNodeJSON(tag, raw)
+		}
 	}
 
 	// 5. sing-box Engine
@@ -109,25 +114,27 @@ func (s *Server) Run() error {
 		return err
 	}
 
-	// 6. TCP TProxy
+	// 6. TCP TProxy (SOCKS5 relay via Xray, with sing-box dialer fallback)
 	relayAddr := s.cfg.TProxy.OutboundAddr
-	if relayAddr == "" {
-		relayAddr = "127.0.0.1:10800"
+	var engineDial tproxy.DialFunc = func(network, addr string) (net.Conn, error) {
+		return s.proxyEngine.DialTimeout(network, addr, 30*time.Second)
 	}
-	s.tproxy = tproxy.NewListener(s.cfg.TProxy.TCPAddr, s.decider, s.cache, relayAddr)
+	s.tproxy = tproxy.NewListener(s.cfg.TProxy.TCPAddr, s.decider, s.cache,
+		relayAddr,
+		engineDial)
 	if err := s.tproxy.Start(); err != nil {
 		return err
 	}
 
 	// 7. UDP TProxy
-	s.udpTpr = tproxy.NewUDPListener(s.cfg.TProxy.UDPAddr, s.decider, s.cache, relayAddr)
+	s.udpTpr = tproxy.NewUDPListener(s.cfg.TProxy.UDPAddr, s.decider, s.cache, "127.0.0.1:10800")
 	if err := s.udpTpr.Start(); err != nil {
 		return err
 	}
 
 	// 8. Health Checker
-	s.healthChk = proxy.NewHealthChecker(s.nodeMgr, 30*time.Second, 5*time.Second)
-	s.healthChk.Start(s.ctx)
+	hc := proxy.NewHealthChecker(s.nodeMgr, 30*time.Second, 5*time.Second)
+	hc.Start(s.ctx)
 
 	// ── Phase 4: DNS Subsystem ──
 
@@ -148,8 +155,8 @@ func (s *Server) Run() error {
 		upstreams = dns.DefaultUpstreams()
 	}
 
-	// 11. DNS Engine
-	s.dnsEngine = dns.NewEngine(upstreams, s.dnsCache)
+	// 11. DNS Engine (with Rule Engine + Flow Cache writeback)
+	s.dnsEngine = dns.NewEngine(upstreams, s.dnsCache, s.ruleEngine, s.flowWriter)
 
 	// 12. Upstream Manager
 	s.dnsUpMgr = dns.NewUpstreamManager(upstreams, s.dnsEngine)
@@ -172,9 +179,64 @@ func (s *Server) Run() error {
 	select {
 	case sig := <-sigCh:
 		log.Info("received signal", map[string]interface{}{"signal": sig.String()})
+		if sig == syscall.SIGHUP {
+			return s.reload()
+		}
 	case <-s.ctx.Done():
 	}
 	return s.Shutdown()
+}
+
+// reload handles SIGHUP — reloads config, rules, and restarts subsystems.
+func (s *Server) reload() error {
+	log.Info("SIGHUP received — reloading configuration")
+
+	// Reload config from file
+	cfg, err := config.Load(s.cfg.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("reload config: %w", err)
+	}
+	s.cfg = cfg
+
+	// Reload Geo databases
+	if s.geoReader != nil {
+		_ = s.geoReader.ReloadGeoIP()
+	}
+
+	// Reload rules
+	s.ruleEngine = rule.NewEngine(s.geoReader)
+	if err := s.ruleEngine.LoadRules(configToRuleConfigs(s.cfg.Rules)); err != nil {
+		log.Warn("reload rules", map[string]interface{}{"error": err.Error()})
+	}
+
+	// Update Decision Interface
+	s.decider = tproxy.NewRuleEngineDecider(s.ruleEngine)
+
+	// Update DNS engine
+	upstreams := configToUpstreams(s.cfg.DNS.Upstreams)
+	if len(upstreams) == 0 {
+		upstreams = dns.DefaultUpstreams()
+	}
+	s.dnsEngine = dns.NewEngine(upstreams, s.dnsCache, s.ruleEngine, s.flowWriter)
+	if s.dnsUpMgr != nil {
+		s.dnsUpMgr.Reload(upstreams)
+	}
+
+	// Restart DNS server
+	if s.dnsServer != nil {
+		s.dnsServer.Close()
+	}
+	dnsAddr := s.cfg.DNS.Listen
+	if dnsAddr == "" {
+		dnsAddr = ":53"
+	}
+	s.dnsServer = dns.NewServer(dnsAddr, s.dnsEngine)
+	if err := s.dnsServer.Start(); err != nil {
+		return err
+	}
+
+	log.Info("reload complete")
+	return nil
 }
 
 func (s *Server) Shutdown() error {

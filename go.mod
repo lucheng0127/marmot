@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/cilium/ebpf v0.21.0
 	github.com/oschwald/maxminddb-golang v1.13.1
+	github.com/sagernet/sing v0.8.10
 	github.com/sagernet/sing-box v1.13.13
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -105,7 +106,6 @@ require (
 	github.com/sagernet/netlink v0.0.0-20240612041022-b9a21c07ac6a // indirect
 	github.com/sagernet/nftables v0.3.0-mod.2 // indirect
 	github.com/sagernet/quic-go v0.59.0-sing-box-mod.4 // indirect
-	github.com/sagernet/sing v0.8.10 // indirect
 	github.com/sagernet/sing-mux v0.3.4 // indirect
 	github.com/sagernet/sing-quic v0.6.1 // indirect
 	github.com/sagernet/sing-shadowsocks v0.2.8 // indirect

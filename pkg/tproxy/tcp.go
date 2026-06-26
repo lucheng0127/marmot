@@ -24,27 +24,30 @@ type Listener struct {
 	decider   Decider
 	cache     FlowCacheWriter
 	ln        net.Listener
-	relayAddr *string // outbound address for TCP relay (e.g. "127.0.0.1:10800")
+	relayAddr *string  // SOCKS5 relay address (e.g. "127.0.0.1:10800")
+	dial      DialFunc // sing-box dialer (used when relayAddr is nil)
 }
 
 // NewListener creates a new TProxy TCP listener.
-// addr: listening address like ":1080"
-// decider: Decision Interface
-// cache: Decision Cache
-// relayAddr: optional outbound address for TCP relay (Phase 3)
-func NewListener(addr string, decider Decider, cache FlowCacheWriter, relayAddr ...string) *Listener {
-	var ra *string
-	if len(relayAddr) > 0 && relayAddr[0] != "" {
-		ra = &relayAddr[0]
+// If dial is nil and relayAddr is empty, traffic is dropped after logging.
+func NewListener(addr string, decider Decider, cache FlowCacheWriter, relayAddrOrDial ...interface{}) *Listener {
+	l := &Listener{
+		addr:    addr,
+		decider: decider,
+		cache:   cache,
 	}
-	return &Listener{
-		addr:      addr,
-		decider:   decider,
-		cache:     cache,
-		relayAddr: ra,
+	for _, arg := range relayAddrOrDial {
+		switch v := arg.(type) {
+		case string:
+			if v != "" {
+				l.relayAddr = &v
+			}
+		case DialFunc:
+			l.dial = v
+		}
 	}
+	return l
 }
-
 func (l *Listener) Start() error {
 	config := &net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
@@ -138,7 +141,7 @@ func (l *Listener) handleConn(conn net.Conn) {
 		l.cache.Insert(cacheKey, uint8(decision))
 	}
 
-	// Phase 3: relay to outbound engine
+	// Relay: SOCKS5 via Xray, or sing-box dialer fallback
 	if decision == uint8(DecisionProxy) && l.relayAddr != nil {
 		relay := NewTCPRelay(*l.relayAddr, 30*time.Second)
 		if err := relay.Relay(conn, origAddr); err != nil {
@@ -147,6 +150,23 @@ func (l *Listener) handleConn(conn net.Conn) {
 				"src":   conn.RemoteAddr().String(),
 				"dst":   origAddr.String(),
 			})
+		}
+	} else if decision == uint8(DecisionProxy) && l.dial != nil {
+		relay := NewTCPRelay2(l.dial, 30*time.Second)
+		if err := relay.Relay(conn, origAddr); err != nil {
+			log.Error("relay error", map[string]interface{}{
+				"error": err.Error(),
+				"src":   conn.RemoteAddr().String(),
+				"dst":   origAddr.String(),
+			})
+		}
+	} else if decision == uint8(DecisionDirect) && l.dial != nil {
+		directDial := func(network, addr string) (net.Conn, error) {
+			return net.DialTimeout(network, addr, 10*time.Second)
+		}
+		relay := NewTCPRelay2(directDial, 30*time.Second)
+		if err := relay.Relay(conn, origAddr); err != nil {
+			log.Debug("direct relay end", map[string]interface{}{"src": conn.RemoteAddr().String(), "dst": origAddr.String()})
 		}
 	} else {
 		conn.Close()

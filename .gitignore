@@ -1,30 +1,18 @@
-# Binaries
 build/
 /marmot
 /marmot-arm
-/marmot-arm64
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Go
-*.test
-*.out
-vendor/
+# Temp files
+tmp/
 
 # BPF generated
-bpf_bpf*
 *.o
-!pkg/bpf/marmot_bpf*.o
-*.ll
+!.gitkeep
+pkg/bpf/marmot_bpf*.o
 
 # Misc
-*.log
-*.pid
+*.ll
+*.swp
+*.swo
+*~
+.DS_Store

@@ -1,31 +1,40 @@
-# Phase 5 Level 3 测试报告 (GeoIP)
+# Level 3 Test Report — Real Proxy Nodes
 
-## 测试环境
-- 平台: Raspberry Pi 3B+ (ARMv7, Debian 12)
-- GeoIP DB: GeoLite2-Country.mmdb (8.8MB)
-- 代理节点: JP01: VLESS+REALITY (vision flow)
-- Xray SOCKS5 inbound -> VLESS+REALITY outbound
+## Configuration
 
-## 测试结果
+Proxy nodes from `proxy_server.txt`:
+- **JP01**: VLESS+REALITY (vision flow) — Japan dedicated
+- **JP02**: VLESS+REALITY (vision flow) — Japan dedicated
+- **SG01**: VLESS+REALITY (vision flow) — Singapore dedicated
+- **HK01**: VMess+gRPC+TLS — Hong Kong
 
-| 测试项 | 结果 | 日志 |
-|--------|------|------|
-| GeoIP CN -> direct | ✅ | `action=direct match=geoip` |
-| GeoIP 非CN -> proxy | ✅ | `action=proxy match=default` |
-| Proxy 链路 | ✅ | 403 response (CloudFront) |
-| eBPF Flow Cache | ✅ | TCP/UDP maps loaded |
+Outbound engine: Xray 26.3.27 (SOCKS5 inbound -> VLESS/VMess outbound)
 
-## 完整链路日志
+## Results
+
+| Test | Target | Result | Via |
+|------|--------|--------|-----|
+| HTTP | google.com | HTTP 301 | JP01 |
+| HTTPS | google.com | HTTP 301 | JP01 |
+| HTTP | cloudflare.com | HTTP 301 | JP01 |
+| HTTP | github.com | HTTP 301 | JP01 |
+| HTTP | baidu.com | 000 | direct (GeoIP CN) |
+
+## Full Chain
 
 ```
-=== CN IP 180.76.76.76 ===
-Rule Engine decision action=direct match=geoip
-TProxy connection orig_dst=180.76.76.76:80 decision=direct
-  -> 无 relay (direct bypass)
+ns-client -> eBPF(Flow MISS) -> fwmark=1 -> TProxy
+  -> SOCKS5 relay -> Xray :10800
+  -> VLESS+REALITY -> JP01 (日本专线)
+  -> internet -> HTTP 301 response
 
-=== US IP 52.84.123.189 ===
-Rule Engine decision action=proxy match=default
-TProxy connection orig_dst=52.84.123.189:80 decision=proxy
--> SOCKS5 relay -> Xray :10800
--> VLESS+REALITY -> JP01 -> 目标 -> 403 response
+ns-client -> dig -> DNS (223.5.5.5)
+  -> transparent hijack -> Marmot DNS :53
+  -> cache -> resolve -> response
 ```
+
+## Config Reference
+
+For sing-box based setup (without Xray), see `config.example.yaml`:
+- `proxy.nodes` section for outbound configuration
+- Supports: vless, vmess, shadowsocks, trojan, hysteria2, wireguard, tuic

@@ -5,6 +5,8 @@
 
 Marmot 是一个基于 eBPF + sing-box 的透明代理网关系统，支持 GeoIP/GeoSite 智能分流、TCP/UDP TProxy、DNS 防污染。
 
+支持的代理协议：**VLESS、VMess、Shadowsocks、Trojan、Hysteria2、WireGuard、TUIC**（通过 sing-box 或 Xray 作为 outbound engine）。
+
 ## Architecture
 
 ```
@@ -51,6 +53,7 @@ Marmot 是一个基于 eBPF + sing-box 的透明代理网关系统，支持 GeoI
 - Go 1.21+
 - clang (BPF compilation)
 - Root privileges (CAP_NET_ADMIN, CAP_SYS_ADMIN)
+- Xray or sing-box as outbound engine
 
 ### Build
 
@@ -61,25 +64,38 @@ make build-arm  # cross-compile for ARM
 
 ### Config
 
-See [config.example.yaml](config.example.yaml)
+See [config.example.yaml](config.example.yaml) for a complete reference.
+
+Minimal config:
+```yaml
+tproxy:
+  tcp_addr: ":1080"
+bpf:
+  interface: br0
+dns:
+  upstreams:
+    - type: udp; address: "223.5.5.5:53"; tag: aliyun
+rules:
+  - type: geoip; match: CN; action: {mode: direct}
+  - type: default; match: ""; action: {mode: proxy}
+```
 
 ### Run
 
 ```bash
-# 1. Set up policy routing + TPROXY
-ip route add local 0.0.0.0/0 dev lo table 100
-ip rule add fwmark 1 lookup 100 priority 1000
-iptables -t mangle -A PREROUTING -m mark --mark 1 -j TPROXY --on-port 1080 --on-ip 127.0.0.1
-
-# 2. DNS transparent hijack
-iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-port 53
-
-# 3. Start Xray (or other outbound engine)
+# Start your outbound engine
 xray run -c config.json
 
-# 4. Start Marmot
+# Start Marmot (all network rules configured automatically)
 sudo ./build/marmot -config marmot.yaml
+
+# Test
+curl -4 http://google.com/   # → proxy (US IP)
+curl -4 http://baidu.com/    # → direct (CN domain, GeoIP)
+dig @8.8.8.8 example.com     # → transparent hijack to local DNS
 ```
+
+No manual iptables or ip commands needed — Marmot configures everything on startup and cleans up on exit.
 
 ## Tested Environment
 
@@ -98,6 +114,7 @@ sudo ./build/marmot -config marmot.yaml
 | 3 | sing-box + SOCKS5 relay + UDP TProxy | ✅ |
 | 4 | DNS subsystem | ✅ |
 | 5 | Rule Engine + eBPF Flow Cache | ✅ |
+| 6 | Network automation + SIGHUP reload + DNS→FlowCache | ⬅️ |
 
 ## Geo Database
 

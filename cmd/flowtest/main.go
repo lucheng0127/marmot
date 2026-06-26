@@ -39,7 +39,8 @@ func main() {
 
 	// 3. Decision Interface + TProxy
 	decider := tproxy.NewStaticDecider()
-	listener := tproxy.NewListener(*tproxyAddr, decider, cache)
+	var nilDial tproxy.DialFunc
+	listener := tproxy.NewListener(*tproxyAddr, decider, cache, nilDial)
 	if err := listener.Start(); err != nil {
 		log.Error("TProxy start failed", map[string]interface{}{"error": err.Error()})
 		os.Exit(1)

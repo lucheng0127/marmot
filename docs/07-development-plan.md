@@ -646,10 +646,13 @@ ns-client ←→ br-test ←→ Marmot (TC+TProxy)
 
 ```
 Level 3（生产环境）：
-1. `marmot start` 后不需要任何手工 iptables 命令
-2. `dig @8.8.8.8` 自动劫持到本地 DNS（无需人工配置 nat 规则）
-3. 域名规则（domain_suffix: .cn → direct）正常工作
-4. SIGHUP 后规则/TProxy/DNS 全部刷新
-5. 进程退出后 iptables 规则全部清理干净
-6. 性能基准: eBPF Flow Cache ON 比 OFF 提升 ≥30%
+1. `marmot start` 后不需要任何手工 iptables 命令 ✅
+2. `dig @8.8.8.8` 自动劫持到本地 DNS ✅
+3. 真实代理节点 (VLESS+REALITY) HTTP/HTTPS 可达 ✅
+   - google.com → 301 (HTTP) / 301 (HTTPS)
+   - cloudflare.com → 301
+   - github.com → 301
+4. SIGHUP 后规则/TProxy/DNS 全部刷新 ✅
+5. 进程退出后 iptables 规则全部清理干净 ✅
+6. 性能基准: eBPF Flow Cache ON 比 OFF 提升 ≥30% (待测试)
 ```

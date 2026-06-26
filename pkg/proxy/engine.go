@@ -3,24 +3,30 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"net"
+	"time"
 
 	"github.com/sagernet/sing-box"
+	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+
+	"github.com/lucheng0127/marmot/pkg/log"
 )
 
-// Engine wraps a sing-box Box instance as an outbound engine only.
-// Per ADR-003/008: sing-box handles outbound protocols, Marmot handles inbound.
 type Engine struct {
 	box    *box.Box
 	ctx    context.Context
 	cancel context.CancelFunc
+	dialer N.Dialer
 }
 
-// New creates a new Engine from the given sing-box options.
 func New(ctx context.Context, options option.Options) (*Engine, error) {
+	sboxCtx := include.Context(ctx)
 	instance, err := box.New(box.Options{
-		Context: include.Context(ctx),
+		Context: sboxCtx,
 		Options: options,
 	})
 	if err != nil {
@@ -31,14 +37,29 @@ func New(ctx context.Context, options option.Options) (*Engine, error) {
 		box:    instance,
 		ctx:    subCtx,
 		cancel: cancel,
+		dialer: dialer.NewDefaultOutbound(sboxCtx),
 	}, nil
 }
 
-func (e *Engine) Start() error {
-	return e.box.Start()
-}
+func (e *Engine) Start() error { return e.box.Start() }
+func (e *Engine) Close() error { e.cancel(); return e.box.Close() }
 
-func (e *Engine) Close() error {
-	e.cancel()
-	return e.box.Close()
+func (e *Engine) DialTimeout(network, addr string, timeout time.Duration) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(e.ctx, timeout)
+	defer cancel()
+	dest := M.ParseSocksaddr(addr)
+	log.Debug("sing-box dial", map[string]interface{}{
+		"network":   network,
+		"addr":      addr,
+		"fqdn":      dest.IsFqdn(),
+		"is_ip":     dest.IsIP(),
+		"is_valid":  dest.IsValid(),
+		"addr_str":  dest.Addr.String(),
+		"addr_port": dest.Port,
+	})
+	conn, err := e.dialer.DialContext(ctx, network, dest)
+	if err != nil {
+		return nil, fmt.Errorf("sing-box dial %s: %w", addr, err)
+	}
+	return conn, nil
 }

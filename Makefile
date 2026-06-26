@@ -25,13 +25,13 @@ all: build
 .PHONY: build
 build:
 	@echo "Building marmot (linux/amd64)..."
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=amd64 $(GO) build $(LDFLAGS) -o build/marmot ./cmd/marmot/
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=amd64 $(GO) build -tags with_utls $(LDFLAGS) -o build/marmot ./cmd/marmot/
 	@echo "Built: build/marmot"
 
 .PHONY: build-arm
 build-arm:
 	@echo "Cross-compiling marmot for linux/arm (v7)..."
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=arm GOARM=7 $(GO) build $(LDFLAGS) -o build/marmot-arm ./cmd/marmot/
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=arm GOARM=7 $(GO) build -tags with_utls $(LDFLAGS) -o build/marmot-arm ./cmd/marmot/
 	@echo "Built: build/marmot-arm"
 
 .PHONY: build-arm64

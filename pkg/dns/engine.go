@@ -5,22 +5,34 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/lucheng0127/marmot/pkg/log"
+	"github.com/lucheng0127/marmot/pkg/rule"
 )
 
-// Engine handles DNS query processing, caching, and upstream forwarding.
-type Engine struct {
-	cache     *Cache
-	upstreams []*Forwarder
-	timeout   time.Duration
+// FlowWriter is implemented by the server to write DNS results to eBPF Flow Cache.
+type FlowWriter interface {
+	WriteDNSFlow(ip net.IP, port uint16, protocol uint8, action uint8)
 }
 
-func NewEngine(upstreams []*UpstreamConfig, cache *Cache) *Engine {
+// Engine handles DNS query processing, caching, upstream forwarding,
+// and Flow Cache writeback for domain-based rules.
+type Engine struct {
+	cache       *Cache
+	upstreams   []*Forwarder
+	timeout     time.Duration
+	ruleEngine  *rule.Engine
+	flowWriter  FlowWriter
+}
+
+func NewEngine(upstreams []*UpstreamConfig, cache *Cache, ruleEngine *rule.Engine, flowWriter FlowWriter) *Engine {
 	e := &Engine{
-		cache:   cache,
-		timeout: 5 * time.Second,
+		cache:      cache,
+		timeout:    5 * time.Second,
+		ruleEngine: ruleEngine,
+		flowWriter: flowWriter,
 	}
 	for _, cfg := range upstreams {
 		e.upstreams = append(e.upstreams, NewForwarder(cfg))
@@ -28,28 +40,22 @@ func NewEngine(upstreams []*UpstreamConfig, cache *Cache) *Engine {
 	return e
 }
 
-// Resolve performs DNS resolution, checking cache first.
 func (e *Engine) Resolve(ctx context.Context, query []byte) ([]byte, error) {
-	// Extract question name for cache key
 	qname := extractQuestion(query)
 	if qname == "" {
-		// Can't extract question — forward directly
 		return e.forward(ctx, query)
 	}
 
-	// Check cache
 	if cached := e.cache.Get(qname); cached != nil {
 		log.Debug("DNS cache HIT", map[string]interface{}{"qname": qname})
 		return cached, nil
 	}
 
-	// Forward to upstream
 	resp, err := e.forward(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	// Cache the response (extract TTL from answer)
 	ttl := extractMinTTL(resp)
 	e.cache.Put(qname, resp, time.Duration(ttl)*time.Second)
 	log.Debug("DNS cache MISS", map[string]interface{}{
@@ -57,33 +63,118 @@ func (e *Engine) Resolve(ctx context.Context, query []byte) ([]byte, error) {
 		"ttl":   ttl,
 	})
 
+	// Phase 6.2: DNS -> Flow Cache writeback for domain-based rules
+	e.writebackFlowCache(qname, resp)
+
 	return resp, nil
 }
 
-func (e *Engine) forward(ctx context.Context, query []byte) ([]byte, error) {
-	var lastErr error
-	for _, f := range e.upstreams {
-		resp, err := f.Exchange(ctx, query)
-		if err != nil {
-			lastErr = err
-			log.Warn("upstream failed", map[string]interface{}{
-				"addr": f.config.Address,
-				"err":  err.Error(),
-			})
-			continue
-		}
-		return resp, nil
+// writebackFlowCache resolves domain rules and writes decisions to eBPF Flow Cache.
+// Runs in background goroutine to avoid blocking DNS response.
+func (e *Engine) writebackFlowCache(qname string, resp []byte) {
+	if e.ruleEngine == nil || e.flowWriter == nil {
+		return
 	}
-	return nil, fmt.Errorf("all upstreams failed: %w", lastErr)
+	go func() {
+		addr := rule.Addr{Domain: qname}
+		result := e.ruleEngine.Match(addr)
+		if result.Action == rule.ActionProxy {
+			return
+		}
+		ips := extractARecords(resp)
+		for _, ip := range ips {
+			e.flowWriter.WriteDNSFlow(ip, 0, 6, uint8(result.Action))
+			e.flowWriter.WriteDNSFlow(ip, 0, 17, uint8(result.Action))
+		}
+	}()
 }
 
-// extractQuestion extracts the QNAME from a DNS query.
+// extractARecords extracts IPv4 addresses from a DNS response.
+func extractARecords(msg []byte) []net.IP {
+	var ips []net.IP
+	if len(msg) < 12 || (msg[2]>>3)&0xF != 1 {
+		return ips
+	}
+	qdcount := binary.BigEndian.Uint16(msg[4:6])
+	ancount := binary.BigEndian.Uint16(msg[6:8])
+	if qdcount == 0 || ancount == 0 {
+		return ips
+	}
+
+	pos := 12
+	for i := 0; i < int(qdcount) && pos < len(msg); i++ {
+		for pos < len(msg) && msg[pos] != 0 {
+			pos += int(msg[pos]) + 1
+		}
+		pos += 5
+	}
+
+	for i := 0; i < int(ancount) && pos+12 <= len(msg); i++ {
+		// Skip name (pointer or sequence)
+		if msg[pos]&0xC0 == 0xC0 {
+			pos += 2
+		} else {
+			for pos < len(msg) && msg[pos] != 0 {
+				pos += int(msg[pos]) + 1
+			}
+			pos++
+		}
+		if pos+10 > len(msg) {
+			break
+		}
+		rtype := binary.BigEndian.Uint16(msg[pos : pos+2])
+		rdlen := binary.BigEndian.Uint16(msg[pos+8 : pos+10])
+		pos += 10
+		if rtype == 1 && rdlen == 4 && pos+4 <= len(msg) { // A record
+			ips = append(ips, net.IPv4(msg[pos], msg[pos+1], msg[pos+2], msg[pos+3]))
+		}
+		pos += int(rdlen)
+	}
+	return ips
+}
+
+func (e *Engine) forward(ctx context.Context, query []byte) ([]byte, error) {
+	// Try upstreams in parallel, use first successful response
+	type result struct {
+		resp []byte
+		err  error
+	}
+	ch := make(chan result, len(e.upstreams))
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	for _, f := range e.upstreams {
+		f := f // capture
+		go func() {
+			resp, err := f.Exchange(ctx, query)
+			select {
+			case ch <- result{resp, err}:
+			default:
+			}
+		}()
+	}
+
+	var lastErr error
+	for i := 0; i < len(e.upstreams); i++ {
+		select {
+		case r := <-ch:
+			if r.err == nil && len(r.resp) > 0 {
+				return r.resp, nil
+			}
+			lastErr = r.err
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+		}
+	}
+	return nil, fmt.Errorf("dns forward failed: %w", lastErr)
+}
+
 func extractQuestion(msg []byte) string {
 	if len(msg) < 12 {
 		return ""
 	}
 	var buf bytes.Buffer
-	pos := 12 // skip header
+	pos := 12
 	for pos < len(msg) {
 		length := int(msg[pos])
 		if length == 0 {
@@ -98,31 +189,31 @@ func extractQuestion(msg []byte) string {
 		buf.Write(msg[pos+1 : pos+1+length])
 		pos += 1 + length
 	}
+	// After QNAME (null-terminated): QTYPE (2 bytes) + QCLASS (2 bytes)
+	// pos is at the null terminator; QTYPE starts at pos+1
+	if pos+1+4 <= len(msg) {
+		qtype := binary.BigEndian.Uint16(msg[pos+1 : pos+3])
+		fmt.Fprintf(&buf, ":qtype=%d", qtype)
+	}
 	return buf.String()
 }
 
-// extractMinTTL returns the minimum TTL from a DNS response.
 func extractMinTTL(msg []byte) uint32 {
 	if len(msg) < 12 || (msg[2]>>3)&0xF != 1 {
-		return 300 // default if not a response or can't parse
+		return 300
 	}
-	// Parse header
 	qdcount := binary.BigEndian.Uint16(msg[4:6])
 	ancount := binary.BigEndian.Uint16(msg[6:8])
 	if qdcount == 0 || ancount == 0 {
 		return 300
 	}
-
-	// Skip question section
 	pos := 12
 	for i := 0; i < int(qdcount) && pos < len(msg); i++ {
 		for pos < len(msg) && msg[pos] != 0 {
 			pos += int(msg[pos]) + 1
 		}
-		pos += 5 // null label + QTYPE + QCLASS
+		pos += 5
 	}
-
-	// Read first answer's TTL
 	if pos+10 > len(msg) {
 		return 300
 	}
