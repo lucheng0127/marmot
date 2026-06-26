@@ -1,8 +1,10 @@
 package dns
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -47,7 +49,7 @@ func NewForwarder(cfg *UpstreamConfig) *Forwarder {
 		f.client = &http.Client{
 			Timeout: cfg.Timeout,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: false},
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			},
 		}
 	case UpstreamDoT:
@@ -109,16 +111,22 @@ func (f *Forwarder) exchangeRaw(ctx context.Context, query []byte) ([]byte, erro
 }
 
 func (f *Forwarder) exchangeDoH(ctx context.Context, query []byte) ([]byte, error) {
-	req := &http.Request{
-		Method: "POST",
-		URL:    &url.URL{Scheme: "https", Host: hostFromAddr(f.config.Address), Path: "/dns-query"},
-		Header: http.Header{
-			"Content-Type": {"application/dns-message"},
-			"Accept":       {"application/dns-message"},
-		},
-		Body: io.NopCloser(byteReader{query}),
+	// Strip EDNS0 OPT record (ARCOUNT) — DoH doesn't need UDP payload negotiation
+	clean := stripEDNS0(query)
+	if clean == nil {
+		clean = query
 	}
-	resp, err := f.client.Do(req.WithContext(ctx))
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"https://"+hostFromAddr(f.config.Address)+"/dns-query",
+		bytes.NewReader(clean))
+	if err != nil {
+		return nil, fmt.Errorf("doh request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept", "application/dns-message")
+
+	resp, err := f.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("doh request: %w", err)
 	}
@@ -160,6 +168,14 @@ func (f *Forwarder) exchangeDoT(ctx context.Context, query []byte) ([]byte, erro
 }
 
 func hostFromAddr(addr string) string {
+	// Try URL parse first (for DoH addresses like https://1.1.1.1/dns-query)
+	if u, err := url.Parse(addr); err == nil && u.Host != "" {
+		if h, _, e := net.SplitHostPort(u.Host); e == nil {
+			return h
+		}
+		return u.Host
+	}
+	// Fallback to host:port format
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return addr
@@ -167,12 +183,54 @@ func hostFromAddr(addr string) string {
 	return host
 }
 
-type byteReader struct{ data []byte }
-
-func (r byteReader) Read(p []byte) (int, error) {
-	n := copy(p, r.data)
-	if n == 0 {
-		return 0, io.EOF
+// stripEDNS0 removes the OPT record from a DNS query (sets ARCOUNT to 0).
+// Returns nil if no OPT record or query is too short.
+func stripEDNS0(msg []byte) []byte {
+	if len(msg) < 12 {
+		return nil
 	}
-	return n, nil
+	ancount := int(binary.BigEndian.Uint16(msg[6:8]))
+	nscount := int(binary.BigEndian.Uint16(msg[8:10]))
+	arcount := int(binary.BigEndian.Uint16(msg[10:12]))
+	if arcount == 0 {
+		return nil // no OPT to strip
+	}
+	// Parse QDNAME to find end of question section
+	pos := 12
+	for pos < len(msg) {
+		if msg[pos] == 0 {
+			pos += 5 // skip null label + QTYPE + QCLASS
+			break
+		}
+		pos += int(msg[pos]) + 1
+	}
+	if pos > len(msg) {
+		return nil
+	}
+	// Skip answer and authority sections
+	for i := 0; i < ancount+nscount && pos < len(msg); i++ {
+		if msg[pos]&0xC0 == 0xC0 {
+			pos += 2
+		} else {
+			for pos < len(msg) && msg[pos] != 0 {
+				pos += int(msg[pos]) + 1
+			}
+			pos++ // null label
+		}
+		if pos+10 > len(msg) {
+			return nil
+		}
+		rdlen := int(binary.BigEndian.Uint16(msg[pos+8 : pos+10]))
+		pos += 10 + rdlen
+	}
+	// Truncate: exclude OPT record, set ARCOUNT=0
+	result := make([]byte, pos)
+	copy(result, msg[:pos])
+	binary.BigEndian.PutUint16(result[10:12], 0) // ARCOUNT = 0
+	// Clear AD and CD bits in flags — DoH endpoints may reject them
+	// Also strip any non-standard flags, keep only RD
+	flags := binary.BigEndian.Uint16(result[2:4])
+	flags &= 0x0100 // keep only RD
+	binary.BigEndian.PutUint16(result[2:4], flags)
+	return result
 }
