@@ -1,60 +1,146 @@
-# marmot default configuration
-# See docs/ for full documentation
+# ============================================================================
+# Marmot Configuration Guide
+# ============================================================================
+# This is the canonical configuration reference.
+# Copy this file, edit the values, and run:
+#   sudo ./marmot -config marmot.yaml
+#
+# Full sing-box outbound docs:
+#   https://sing-box.sagernet.org/configuration/outbound/
+# ============================================================================
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 log:
+  # Level: debug, info, warn, error
   level: info
+  # Format: text, json
   format: text
+  # Output: stdout, stderr, or an absolute file path
   output: stdout
 
+# ---------------------------------------------------------------------------
+# Proxy Outbound — Node Definitions
+# ---------------------------------------------------------------------------
+# Each key is a node tag. The first node (sorted by tag) is the default
+# outbound. If it fails, fallback nodes are tried automatically.
+# See https://sing-box.sagernet.org/configuration/outbound/ for all options.
+proxy:
+  nodes:
+
+    # Example: VLESS + REALITY (Japan)
+    proxy-jp01:
+      type: vless
+      server: jp01.example.com
+      server_port: 443
+      uuid: "your-uuid"
+      flow: xtls-rprx-vision
+      tls:
+        enabled: true
+        server_name: www.samsung.com
+        utls:
+          enabled: true
+          fingerprint: chrome
+        reality:
+          enabled: true
+          public_key: "your-public-key"
+          short_id: "4c9fbcb1"
+
+    # Example: Shadowsocks
+    proxy-ss:
+      type: shadowsocks
+      server: ss.example.com
+      server_port: 8388
+      method: 2022-blake3-aes-128-gcm
+      password: "your-password"
+
+    # Example: VMess + WebSocket + TLS + gRPC
+    proxy-hk01:
+      type: vmess
+      server: hk01.example.com
+      server_port: 443
+      uuid: "your-uuid"
+      security: auto
+      tls:
+        enabled: true
+        server_name: www.12306.cn
+        insecure: true       # skip-cert-verify
+      transport:
+        type: grpc
+        grpc:
+          service_name: "12306"
+
+# ---------------------------------------------------------------------------
+# TProxy Listening Addresses
+# ---------------------------------------------------------------------------
 tproxy:
+  # TCP transparent proxy listener
   tcp_addr: ":1080"
+  # UDP transparent proxy listener
   udp_addr: ":1080"
+  # Optional: SOCKS5 outbound address (instead of sing-box engine)
+  # outbound_addr: "127.0.0.1:10800"
 
-dns:
-  listen: ":53"
-  local_listen: "127.0.0.1:53"
-  cache_size: 4096
-  upstreams:
-    - tag: "domestic"
-      protocol: "udp"
-      addr: "114.114.114.114:53"
-    - tag: "domestic-backup"
-      protocol: "udp"
-      addr: "223.5.5.5:53"
-    - tag: "oversea"
-      protocol: "doh"
-      addr: "https://1.1.1.1/dns-query"
-    - tag: "oversea-backup"
-      protocol: "dot"
-      addr: "tls://8.8.8.8:853"
-
+# ---------------------------------------------------------------------------
+# BPF / eBPF Settings
+# ---------------------------------------------------------------------------
 bpf:
-  interface: "br0"
+  # Bridge interface name where the eBPF TC program attaches
+  interface: br0
+  # CIDR whitelist: traffic matching these ranges bypasses TProxy
+  # (typically local/LAN subnets to avoid loop)
   cidr_whitelist:
     - "10.0.0.0/8"
     - "172.16.0.0/12"
     - "192.168.0.0/16"
     - "127.0.0.0/8"
+  # Your LAN subnet (used for SNAT MASQUERADE rules)
+  lan_subnet: "192.168.100.0/24"
 
-api:
-  listen: ":8080"
-  enable: false
-
+# ---------------------------------------------------------------------------
+# Rule Engine — Traffic Policy
+# ---------------------------------------------------------------------------
 rules:
+  # GeoIP: CN → direct (bypass proxy)
   - type: geoip
     match: "CN"
     action:
       mode: direct
-  - type: geosite
-    match: "cn"
-    action:
-      mode: direct
-  - type: geosite
-    match: "geolocation-!cn"
-    action:
-      mode: proxy
-      tag: "auto"
+  # Default: everything else → proxy
   - type: default
     action:
       mode: proxy
-      tag: "auto"
+
+# ---------------------------------------------------------------------------
+# DNS Server
+# ---------------------------------------------------------------------------
+dns:
+  # Listening address (the port is read for iptables REDIRECT rules)
+  listen: ":53"
+  # Cache size (entries)
+  cache_size: 1024
+  # Cache TTL (seconds)
+  cache_ttl: 300
+  # Upstream DNS servers (queried in parallel, first response wins)
+  # Supported types:
+  #   udp - plain UDP, e.g. "1.1.1.1:53"
+  #   doh - DNS over HTTPS, e.g. "https://1.1.1.1/dns-query"
+  #   dot - DNS over TLS, e.g. "1.1.1.1:853"
+  upstreams:
+    # Overseas DNS — bypass ISP poisoning via DoT (port 853)
+    - type: dot
+      address: "1.1.1.1:853"
+      tag: cloudflare-dot
+    # Domestic DNS — fast for Chinese domains
+    - type: udp
+      address: "223.5.5.5:53"
+      tag: aliyun
+
+# ---------------------------------------------------------------------------
+# GeoIP Database
+# ---------------------------------------------------------------------------
+rule:
+  # Path to GeoLite2-Country.mmdb
+  # Download: https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
+  geoip_path: "/tmp/GeoLite2-Country.mmdb"

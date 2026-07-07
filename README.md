@@ -64,7 +64,7 @@ make build-arm  # cross-compile for ARM
 
 ### Config
 
-See [config.example.yaml](config.example.yaml) for a complete reference.
+See [configs/marmot.yaml](configs/marmot.yaml) for a complete configuration reference with examples and detailed comments.
 
 Minimal config:
 ```yaml

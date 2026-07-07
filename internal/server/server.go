@@ -61,7 +61,12 @@ func (s *Server) Run() error {
 	log.Info("initializing Phase 5 subsystems")
 
 	// 0. Network rules automation (Phase 6.1)
-	s.netRules = netif.New(s.cfg.BPF.LANSubnet)
+	// Parse DNS port from listen address (e.g. ":53" → "53", "127.0.0.1:5353" → "5353")
+	dnsPort := "53"
+	if _, p, err := net.SplitHostPort(s.cfg.DNS.Listen); err == nil && p != "" {
+		dnsPort = p
+	}
+	s.netRules = netif.New(s.cfg.BPF.LANSubnet, dnsPort)
 	if err := s.netRules.Setup(); err != nil {
 		return err
 	}
