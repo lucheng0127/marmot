@@ -106,51 +106,182 @@ bpf:
 # The FIRST matching rule determines the action.
 #   - Rules above take priority over rules below.
 #   - No explicit "priority" field needed — just order them.
-#   - Place specific rules (e.g. geoip:CN) ABOVE general rules (e.g. default).
+#   - Place specific rules (e.g. geoip:CN / specific domain) ABOVE
+#     general rules (e.g. default).
 #
 # Each rule has:
-#   type    : geoip, geosite, or default
-#   match   : value to match against (depends on type)
-#   action.mode : direct (bypass proxy) or proxy (relay through outbound)
+#   type:    rule type (see full list below)
+#   match:   value to match against (depends on type)
+#   action:
+#     mode: direct | proxy | block | dns_upstream
+#     tag:  specific outbound tag (optional, for proxy mode)
 #
-# Rule types:
+# ---------------------------------------------------------------------------
+# Supported Rule Types
+# ---------------------------------------------------------------------------
 #
-#   1. geoip (match country code)
-#      Matches the destination IP address against GeoIP database.
-#      Example: match: "CN" → direct (Chinese IPs go direct)
-#      Example: match: "US" → proxy (US IPs go through proxy)
+# 1. geoip
+#    Matches destination IP country via GeoIP database (.mmdb).
+#    match value: two-letter country code (CN, US, JP, HK, SG, etc.)
+#    Requires: rule.geoip_path pointing to GeoLite2-Country.mmdb
 #
-#   2. geosite (match domain)  -- NOT IMPLEMENTED YET
-#      Matches the domain name against geosite database.
-#      Reserved for future use.
+#    Example — Chinese IPs bypass proxy:
+#      - type: geoip
+#        match: "CN"
+#        action:
+#          mode: direct
 #
-#   3. default (catch-all, no match value needed)
-#      Matches ALL traffic. Must be the LAST rule.
-#      Example: mode: proxy → everything not matched above goes through proxy
-#      Example: mode: direct → everything goes direct (disable proxy)
+#    Example — US IPs through specific node:
+#      - type: geoip
+#        match: "US"
+#        action:
+#          mode: proxy
+#          tag: proxy-jp01
 #
-# Examples:
+# ---------------------------------------------------------------------------
+# 2. ip
+#    Matches exact IP address or CIDR range.
+#    match value: single IP (e.g. "10.0.0.5") or CIDR (e.g. "198.18.0.0/15")
 #
-#   # Block specific IPs
-#   - type: geoip
-#     match: "CN"
-#     action:
-#       mode: direct
+#    Example — block specific IP:
+#      - type: ip
+#        match: "10.0.0.5"
+#        action:
+#          mode: block
 #
-#   # Route all overseas traffic through proxy
-#   - type: default
-#     action:
-#       mode: proxy
+#    Example — route CIDR range through proxy:
+#      - type: ip
+#        match: "198.18.0.0/15"
+#        action:
+#          mode: proxy
 #
-#   # Configure multiple outbounds (requires sing-box RouteOptions rules)
-#   # - type: geoip  (reserved for geosite support)
-#   #   match: "google"
-#   #   action:
-#   #     mode: proxy
-#   #     tag: proxy-jp01    # specific outbound tag
+# ---------------------------------------------------------------------------
+# 3. domain
+#    Matches exact domain name (not subdomains).
+#    match value: full domain (e.g. "baidu.com" matches baidu.com only)
+#
+#    Example — baidu.com direct:
+#      - type: domain
+#        match: "baidu.com"
+#        action:
+#          mode: direct
+#
+#    Example — netflix.com through specific node:
+#      - type: domain
+#        match: "netflix.com"
+#        action:
+#          mode: proxy
+#          tag: proxy-jp01
+#
+# ---------------------------------------------------------------------------
+# 4. domain_suffix
+#    Matches domain by suffix (includes subdomains automatically).
+#    match value: domain suffix (e.g. "google.com" matches
+#                  google.com, www.google.com, apis.google.com, etc.)
+#
+#    Example — all Google subdomains proxy:
+#      - type: domain_suffix
+#        match: "google.com"
+#        action:
+#          mode: proxy
+#
+#    Example — all .cn domains direct:
+#      - type: domain_suffix
+#        match: ".cn"
+#        action:
+#          mode: direct
+#
+# ---------------------------------------------------------------------------
+# 5. domain_keyword
+#    Matches keyword anywhere in the domain name.
+#    match value: keyword string (e.g. "google" matches
+#                  google.com, googleapis.com, fonts.google.com)
+#
+#    Example — block domains containing "ad":
+#      - type: domain_keyword
+#        match: "ad"
+#        action:
+#          mode: block
+#
+#    Example — proxy domains containing "microsoft":
+#      - type: domain_keyword
+#        match: "microsoft"
+#        action:
+#          mode: proxy
+#
+# ---------------------------------------------------------------------------
+# 6. geosite
+#    Matches domain category from geosite database.
+#    match value: category tag (e.g. "cn", "google", "netflix", "apple")
+#    NOTE: Requires .mmdb file; currently reserved for future implementation.
+#
+#    Example:
+#      - type: geosite
+#        match: "cn"
+#        action:
+#          mode: direct
+#
+# ---------------------------------------------------------------------------
+# 7. default
+#    Catch-all rule — matches ALL traffic.
+#    match value: ignored (can be empty "")
+#    MUST be the LAST rule in the list.
+#
+#    Example — everything else proxy:
+#      - type: default
+#        match: ""
+#        action:
+#          mode: proxy
+#
+#    Example — everything else direct (disable proxy):
+#      - type: default
+#        match: ""
+#        action:
+#          mode: direct
+#
+# ---------------------------------------------------------------------------
+# Action Modes
+# ---------------------------------------------------------------------------
+#
+#   direct       → TCP/UDP directly to internet (bypass proxy)
+#   proxy        → relay through proxy outbound (use tag for specific node)
+#   block        → drop the connection immediately
+#   dns_upstream → route through DNS upstream (reserved for future use)
+#
+# ---------------------------------------------------------------------------
+# Priority Examples (correct vs wrong ordering)
+# ---------------------------------------------------------------------------
+#
+#   # CORRECT — specific rules first, general last:
+#   rules:
+#     - type: domain
+#       match: "baidu.com"
+#       action:
+#         mode: direct
+#     - type: domain_suffix
+#       match: "google.com"
+#       action:
+#         mode: proxy
+#     - type: geoip
+#       match: "CN"
+#       action:
+#         mode: direct
+#     - type: default
+#       action:
+#         mode: proxy
+#
+#   # WRONG — default blocks everything below:
+#   rules:
+#     - type: default      # catches ALL traffic first
+#       action:
+#         mode: proxy
+#     - type: geoip        # NEVER evaluated
+#       match: "CN"
+#       action:
+#         mode: direct
 # ---------------------------------------------------------------------------
 rules:
-  # Chinese IPs → direct (bypass proxy, typically faster)
+  # Chinese IPs → direct (bypass proxy, faster for domestic)
   - type: geoip
     match: "CN"
     action:
