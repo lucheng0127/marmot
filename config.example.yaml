@@ -1,6 +1,0 @@
-# DEPRECATED — See configs/marmot.yaml
-#
-# This file has been replaced by configs/marmot.yaml.
-# Please use that file as the configuration reference.
-#
-# Migrate: copy configs/marmot.yaml and edit for your setup.
