@@ -101,14 +101,64 @@ bpf:
 # ---------------------------------------------------------------------------
 # Rule Engine — Traffic Policy
 # ---------------------------------------------------------------------------
+#
+# Rules are evaluated TOP-DOWN (list order = priority).
+# The FIRST matching rule determines the action.
+#   - Rules above take priority over rules below.
+#   - No explicit "priority" field needed — just order them.
+#   - Place specific rules (e.g. geoip:CN) ABOVE general rules (e.g. default).
+#
+# Each rule has:
+#   type    : geoip, geosite, or default
+#   match   : value to match against (depends on type)
+#   action.mode : direct (bypass proxy) or proxy (relay through outbound)
+#
+# Rule types:
+#
+#   1. geoip (match country code)
+#      Matches the destination IP address against GeoIP database.
+#      Example: match: "CN" → direct (Chinese IPs go direct)
+#      Example: match: "US" → proxy (US IPs go through proxy)
+#
+#   2. geosite (match domain)  -- NOT IMPLEMENTED YET
+#      Matches the domain name against geosite database.
+#      Reserved for future use.
+#
+#   3. default (catch-all, no match value needed)
+#      Matches ALL traffic. Must be the LAST rule.
+#      Example: mode: proxy → everything not matched above goes through proxy
+#      Example: mode: direct → everything goes direct (disable proxy)
+#
+# Examples:
+#
+#   # Block specific IPs
+#   - type: geoip
+#     match: "CN"
+#     action:
+#       mode: direct
+#
+#   # Route all overseas traffic through proxy
+#   - type: default
+#     action:
+#       mode: proxy
+#
+#   # Configure multiple outbounds (requires sing-box RouteOptions rules)
+#   # - type: geoip  (reserved for geosite support)
+#   #   match: "google"
+#   #   action:
+#   #     mode: proxy
+#   #     tag: proxy-jp01    # specific outbound tag
+# ---------------------------------------------------------------------------
 rules:
-  # GeoIP: CN → direct (bypass proxy)
+  # Chinese IPs → direct (bypass proxy, typically faster)
   - type: geoip
     match: "CN"
     action:
       mode: direct
-  # Default: everything else → proxy
+
+  # Everything else → proxy (overseas traffic)
   - type: default
+    match: ""
     action:
       mode: proxy
 
